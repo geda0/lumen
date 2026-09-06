@@ -438,8 +438,9 @@ Lumen.repair = (function () {
   function scan(roots, cfg, deadline) {
     var st = pendingState;
     if (!st) {
-      var pageBg = C.hslToRgb(0, 0, cfg.bgMin);
-      pageBg.a = 1;
+      // The same colour the base sheet paints on <html>, tint included, since
+      // that is what an element with no background of its own is sitting on.
+      var pageBg = C.shade(cfg.bgMin, 'bg', cfg);
       touched = [];
       committed = 0;
       st = {
@@ -597,8 +598,7 @@ Lumen.repair = (function () {
   }
 
   function measureProbe(list, state, cfg) {
-    var pageBg = C.hslToRgb(0, 0, cfg.bgMin);
-    pageBg.a = 1;
+    var pageBg = C.shade(cfg.bgMin, 'bg', cfg);
     var memo = new Map();
     var found = [];
 

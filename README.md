@@ -72,6 +72,53 @@ Borders get the background curve clamped into a band that sits a fixed distance
 above the background floor, so a `#ddd` hairline keeps the same visibility at
 every darkness setting instead of collapsing into the page.
 
+### Tint
+
+A dark mode does not have to be grey. The curves land every neutral on a neutral
+dark; a tint pulls those toward a hue you pick — warm grey, slate, ink blue — and
+the picker sets one **per role**, so surfaces, text and borders can each carry
+their own, or none.
+
+The tint is added as a chroma *vector* rather than by rotating hues:
+
+```
+n = 1 − min(1, chroma / 0.15)                        how neutral the colour is
+(x, y) = chroma·(cos h, sin h)  +  amount·n·(cos hₜ, sin hₜ)
+```
+
+A colour carrying no chroma of its own lands exactly on the tint hue. One
+carrying plenty — a brand blue, a red error state, a green diff line — is left
+alone, because a dark mode that rotates brand colours to match a theme is not
+tinting, it is repainting. Everything in between moves by how much room it has,
+and vector addition gets that gradient without special-casing hue wraparound: a
+warm tint on a faintly cool surface *cancels* toward grey rather than flipping it
+180°, which is what you would want and not what a hue lerp would do.
+
+Two things the tint deliberately does not touch:
+
+- **Anything the curve did not move.** A preserved dark region — the code block
+  this whole design is built around keeping byte-for-byte — keeps its own
+  colours, including its own hue. So a warm-tinted page will still show a cool
+  `#282c34` editor block, by construction. Tinting those would also mean emitting
+  an override for every dark colour on the page.
+- **Colours that already have a hue**, per the vector rule above.
+
+Text gets 0.45× the chroma surfaces get, and borders 0.8×: the same chroma that
+reads as a warm surface reads as a colour cast on a paragraph. The colours the
+extension invents rather than converts — the page background, the field surface,
+the selection highlight, the repair pass's idea of what an element is sitting on
+— all run through the same tint, so a tinted site is not sitting on an untinted
+background.
+
+The picker is three hue sliders and a strength slider, not a native
+`<input type="color">`: hue is the only dimension a tint has (the curves own
+lightness, the strength slider owns chroma), and on some platforms opening the
+OS colour dialog from an extension popup dismisses the popup. Each row's swatch
+switches that role's tint off and on and shows the colour it would apply while
+off, so turning one back on is one click and returns the hue that was there.
+The popup loads `color.js` itself, so the swatches and the preview run the same
+code the page does rather than a mirror of it that can drift.
+
 ## How it is applied
 
 1. **Parse.** Every rule in `document.styleSheets`, `adoptedStyleSheets` and each
@@ -287,9 +334,10 @@ in between is ever put on screen. Splitting that work across an idle callback is
 precisely what made the view flash white and then invert.
 
 Two things keep that affordable. A settings change is only treated as a palette
-change when the darkness, contrast or saturation values actually moved — toggling
-a site or flipping *skip dark sites* leaves every colour where it was, and takes
-a 0.7 ms path instead of a 50 ms one. And the popup coalesces slider writes: the
+change when a value that colours something actually moved — darkness, contrast,
+saturation, or any of the tint settings; toggling a site or flipping *skip dark
+sites* leaves every colour where it was, and takes a 0.7 ms path instead of a
+50 ms one. And the popup coalesces slider writes: the
 preview in the popup updates on every event, while the page follows at a few
 frames a second and lands exactly on release.
 
@@ -354,6 +402,9 @@ Enable **Developer mode**, choose **Load unpacked**, and select this folder.
 - *Skip sites that are already dark* is on by default.
 - Sliders: **Darkness** (how deep the background floor goes), **Text contrast**
   (how far text is lifted), **Color intensity** (saturation multiplier).
+- **Tint**: a hue per role — surfaces, text, borders — with one strength for all
+  three. Click a swatch to switch that role's tint off or on; drag its slider to
+  pick the hue. Off by default, and *Reset appearance* clears it.
 
 ## Tests
 

@@ -157,6 +157,77 @@ input[type="range"]::-webkit-slider-thumb {
   cursor: pointer;
 }
 
+/* --- tint --------------------------------------------------------------- */
+
+.tints {
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--line);
+  margin-top: 2px;
+}
+
+.tints[data-disabled="true"] {
+  opacity: .4;
+  pointer-events: none;
+}
+
+.tints-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.tints-head .hint {
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.tint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tint-row label {
+  width: 58px;
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.swatch {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #141414;
+  cursor: pointer;
+}
+
+/* Off is shown, not hidden: the swatch keeps the colour it would apply, struck
+   through, so turning it back on is one click and holds the same hue. */
+.swatch[aria-pressed="false"] {
+  background-image: linear-gradient(
+    45deg, transparent 45%, var(--muted) 45%, var(--muted) 55%, transparent 55%);
+}
+
+.swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+input[type="range"].hue {
+  background: linear-gradient(90deg,
+    hsl(0 70% 55%), hsl(60 70% 55%), hsl(120 70% 55%),
+    hsl(180 70% 55%), hsl(240 70% 55%), hsl(300 70% 55%), hsl(360 70% 55%));
+}
+
+.tint-row[data-off="true"] input[type="range"].hue { filter: grayscale(1); opacity: .5; }
+
 .preview {
   margin: 4px 0 2px;
   border: 1px solid var(--line);
@@ -184,6 +255,7 @@ input[type="range"]::-webkit-slider-thumb {
 .preview-code {
   margin: 8px 0 0;
   padding: 7px 8px;
+  border: 1px solid transparent;
   border-radius: 4px;
   font: 10px/1.3 ui-monospace, monospace;
   background: #1b1f23;

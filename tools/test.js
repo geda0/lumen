@@ -134,6 +134,57 @@ check('contrast repair does not gain chroma either', (() => {
   return after && ch(after) <= ch(before) + 1e-3;
 })());
 
+group('tint');
+// A tint pulls neutrals toward a hue; anything with a colour of its own keeps
+// it, and anything the curve did not move is not touched at all.
+const warm = { ...cfg, tint: { bg: { h: 30, amount: 0.09 },
+                               fg: { h: 30, amount: 0.04 },
+                               border: { h: 30, amount: 0.07 } } };
+const modT = (css, role) => C.toCss(C.modify(C.parse(css), role, warm));
+const hueOf = (css) => { const c = C.parse(css); return C.rgbToHsl(c.r, c.g, c.b).h; };
+check('a white surface takes the tint hue',
+  Math.abs(hueOf(modT('#ffffff', 'bg')) - 30) < 2, modT('#ffffff', 'bg'));
+check('a white surface is warmer than it is blue', (() => {
+  const c = C.parse(modT('#ffffff', 'bg'));
+  return c.r > c.b + 6;
+})(), modT('#ffffff', 'bg'));
+check('text takes the tint too', Math.abs(hueOf(modT('#000000', 'fg')) - 30) < 2,
+  modT('#000000', 'fg'));
+check('borders take the tint too', Math.abs(hueOf(modT('#dddddd', 'border')) - 30) < 2,
+  modT('#dddddd', 'border'));
+check('THE requirement still holds: an already-dark block is not tinted',
+  modT('#282c34', 'bg') === '#282c34', modT('#282c34', 'bg'));
+check('already-light text is not tinted either',
+  modT('#abb2bf', 'fg') === '#abb2bf', modT('#abb2bf', 'fg'));
+check('a brand colour keeps its own hue under a tint', (() => {
+  const before = hueOf('#1a73e8');
+  return Math.abs(hueOf(modT('#1a73e8', 'bg')) - before) < 3;
+})(), modT('#1a73e8', 'bg'));
+check('a partly-coloured surface moves only partway', (() => {
+  // #e8eef6 is faintly blue (hue 214, chroma 0.055). A violet tint pulls it
+  // toward, but not all the way to, the tint hue.
+  const violet = { ...cfg, tint: { bg: { h: 270, amount: 0.09 } } };
+  const h = hueOf(C.toCss(C.modify(C.parse('#e8eef6'), 'bg', violet)));
+  return h > 216 && h < 268;
+})());
+check('an opposing tint cancels toward neutral rather than flipping the hue', (() => {
+  // Chroma is added as a vector, so a warm tint on a cool surface subtracts.
+  // The result is a grey, never the same colour with the hue spun 180 degrees.
+  const c = C.parse(modT('#e8eef6', 'bg'));
+  return Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b) <= 3;
+})(), modT('#e8eef6', 'bg'));
+check('the tint changes the shade of an invented colour', (() => {
+  const c = C.parse(C.toCss(C.shade(cfg.bgMin, 'bg', warm)));
+  return c.r > c.b;
+})(), C.toCss(C.shade(cfg.bgMin, 'bg', warm)));
+check('no tint configured leaves shade() neutral', (() => {
+  const c = C.parse(C.toCss(C.shade(cfg.bgMin, 'bg', cfg)));
+  return c.r === c.g && c.g === c.b;
+})(), C.toCss(C.shade(cfg.bgMin, 'bg', cfg)));
+check('a zero-amount tint is the same as none',
+  C.toCss(C.shade(cfg.bgMin, 'bg', { tint: { bg: { h: 30, amount: 0 } } })) ===
+  C.toCss(C.shade(cfg.bgMin, 'bg', cfg)));
+
 group('value scanning inside complex declarations');
 const seen = [];
 CSS.eachToken('linear-gradient(to right, #fff 0%, rgba(0,0,0,.5) 100%)',

@@ -34,8 +34,19 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     darkness: 50,
     contrast: 50,
     saturation: 50,
+    // Tint hues in degrees, or null for a neutral grey. One per role, so
+    // surfaces, text and borders can each carry their own.
+    tintSurface: null,
+    tintText: null,
+    tintBorder: null,
+    tintStrength: 45,
     sites: {}
   };
+
+  // Chroma a tint adds at full strength. Text gets a fraction of it: the same
+  // chroma that reads as a warm surface reads as a colour cast on a paragraph.
+  var TINT_MAX = 0.09;
+  var TINT_SCALE = { bg: 1, fg: 0.45, border: 0.8 };
 
   var host = location.hostname || 'local';
   var settings = null;
@@ -80,10 +91,22 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
 
   // --- configuration -------------------------------------------------------
 
+  function tintOf(hue, strength, role) {
+    if (hue === null || hue === undefined || hue === '' || !strength) return null;
+    var h = Number(hue);
+    if (isNaN(h)) return null;
+    return { h: h, amount: TINT_MAX * TINT_SCALE[role] * (strength / 100) };
+  }
+
   function derive(s) {
     var bgMin = 0.14 - (s.darkness / 100) * 0.12;
     var bgMax = bgMin + 0.22;
     return {
+      tint: {
+        bg: tintOf(s.tintSurface, s.tintStrength, 'bg'),
+        fg: tintOf(s.tintText, s.tintStrength, 'fg'),
+        border: tintOf(s.tintBorder, s.tintStrength, 'border')
+      },
       bgMin: bgMin,
       bgMax: bgMax,
       // Borders sit a fixed distance above the background floor, so they stay
@@ -102,18 +125,23 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     return explicit === undefined ? s.defaultOn : explicit;
   }
 
+  /**
+   * The colours we invent rather than convert. Each is a neutral at a chosen
+   * lightness, run through the same tint as the colours that came from the page
+   * -- otherwise a tinted site would sit on an untinted background.
+   */
   function baseColors() {
     return {
-      bg: C.toCss(C.hslToRgb(0, 0, cfg.bgMin)),
-      fg: C.toCss(C.hslToRgb(0, 0, cfg.fgMax)),
+      bg: C.toCss(C.shade(cfg.bgMin, 'bg', cfg)),
+      fg: C.toCss(C.shade(cfg.fgMax, 'fg', cfg)),
       // A field surface, lifted off the page so inputs stay distinguishable --
       // the same separation Chrome gives a control under `color-scheme: dark`.
-      field: C.toCss(C.hslToRgb(0, 0, C.clamp(cfg.bgMin + 0.09, 0, 1))),
+      field: C.toCss(C.shade(C.clamp(cfg.bgMin + 0.09, 0, 1), 'bg', cfg)),
       // Selection. Chrome's own dark-mode highlight is a saturated blue, which
       // on a page whose surfaces we have deliberately kept near-neutral is the
       // loudest thing on screen. A grey one reads as a highlight without
       // recolouring the text under it.
-      selection: C.toCss(C.hslToRgb(0, 0, C.clamp(cfg.bgMin + 0.26, 0, 1)))
+      selection: C.toCss(C.shade(C.clamp(cfg.bgMin + 0.26, 0, 1), 'bg', cfg))
     };
   }
 
@@ -1007,7 +1035,9 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   function load(stored) {
     settings = Object.assign({}, DEFAULTS, stored || {});
     settings.sites = settings.sites || {};
-    var key = settings.darkness + '|' + settings.contrast + '|' + settings.saturation;
+    var key = [settings.darkness, settings.contrast, settings.saturation,
+               settings.tintSurface, settings.tintText, settings.tintBorder,
+               settings.tintStrength].join('|');
     var moved = key !== cfgKey;
     cfgKey = key;
     cfg = derive(settings);
