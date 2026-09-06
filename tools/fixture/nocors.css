@@ -39,3 +39,17 @@ code.inline { background: #f6f8fa; padding: 2px 5px; border-radius: 4px; }
 
 /* Probe surfaces: unreachable sheet, so only the repair pass can fix them. */
 .probe-white { background: #ffffff; color: #1a1a1a; padding: 4px; display: block; }
+
+/* Interaction states, in a sheet the rule walker cannot read. The resting
+   colours are dark enough to survive on their own, so anything still light
+   here can only have come from the state. */
+.state-row { background: #ffffff; color: #1a1a1a; padding: 8px; display: block; border: 1px solid #dddddd; }
+.state-row:hover { background: #e8f0fe; color: #0b3d91; }
+.state-row.selected { background: #d0e2ff; color: #0b3d91; }
+.state-btn { background: #f6f8fa; color: #24292f; border: 1px solid #d0d7de; padding: 6px 12px; }
+.state-btn:hover { background: #ffffff; }
+.state-btn:active { background: #eaeef2; }
+.state-field { background: #ffffff; color: #111111; border: 1px solid #cccccc; }
+.state-field:focus { background: #ffffff; color: #000000; outline: 2px solid #0969da; }
+.state-list:hover .state-cell { background: #f0f6ff; color: #0b3d91; }
+.state-cell { background: #ffffff; color: #1a1a1a; padding: 6px; }

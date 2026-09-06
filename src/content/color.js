@@ -215,6 +215,32 @@ Lumen.color = (function () {
   }
 
   /**
+   * Saturation to use after a colour has been moved to a new lightness.
+   *
+   * HSL saturation is a *ratio*, not an amount: the chroma a colour actually
+   * carries is `s x (1 - |2l - 1|)`, which collapses to zero at both ends of
+   * the lightness scale. So carrying `s` across a large lightness move silently
+   * multiplies the colour's real chroma. `#f6f8fa` -- the blue-grey a great many
+   * sites use for `pre`, cards and table stripes -- is `s = 0.29` at `l = 0.97`,
+   * which is a chroma of 0.016: white with a hint of cool in it. Dropped to
+   * `l = 0.08` at the same `s` it comes out at a chroma of 0.046, three times the
+   * tint it started with, and now at a lightness where the eye reads hue easily.
+   * Do that to every surface, border and shadow on a page and the result is the
+   * uniform navy wash that dark modes are notorious for.
+   *
+   * So we hold the *chroma* instead, and never let it grow. Saturated colours are
+   * unaffected -- a brand blue keeps every bit of its saturation, because moving
+   * it toward mid-lightness only gives it more room -- while near-neutral greys
+   * stay near-neutral, which is what they were.
+   */
+  function chromaSafe(s, l, nl) {
+    var capNew = 1 - Math.abs(2 * nl - 1);
+    if (capNew <= 0) return 0;
+    var capOld = 1 - Math.abs(2 * l - 1);
+    return capOld < capNew ? s * (capOld / capNew) : s;
+  }
+
+  /**
    * Convert one color for a given role.
    *   'fg'     text, icons, SVG fill/stroke
    *   'bg'     backgrounds, gradients, shadows
@@ -242,8 +268,9 @@ Lumen.color = (function () {
       if (rgb.a < 0.5 && l >= 0.5) nl = Math.max(nl, cfg.bgMax + 0.05);
     }
 
-    var ns = clamp(hsl.s * cfg.sat, 0, 1);
-    var out = hslToRgb(hsl.h, ns, clamp(nl, 0, 1));
+    nl = clamp(nl, 0, 1);
+    var ns = clamp(chromaSafe(hsl.s, l, nl) * cfg.sat, 0, 1);
+    var out = hslToRgb(hsl.h, ns, nl);
     out.a = rgb.a;
     return out;
   }
@@ -254,6 +281,7 @@ Lumen.color = (function () {
     rgbToHsl: rgbToHsl,
     hslToRgb: hslToRgb,
     modify: modify,
+    chromaSafe: chromaSafe,
     bgCurve: bgCurve,
     fgCurve: fgCurve,
     clamp: clamp
