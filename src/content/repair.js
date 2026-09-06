@@ -45,11 +45,11 @@ Lumen.repair = (function () {
   // Two failure modes sit on either side of this number. Too low and a big page
   // needs many slices; idle callbacks are scarce on a busy page and throttled
   // hard in a background tab, so the scan crawls and surfaces stay light for
-  // seconds. Too high and one slice blocks the main thread. Since separating
-  // reads from writes the scan costs about 0.003 ms per element, so this is
-  // roughly a 60 ms ceiling per slice, and every ordinary page -- and most large
-  // ones -- finishes in a single pass. Only genuinely huge documents slice.
-  var MIN_PER_SLICE = 20000;
+  // seconds. Too high and the deadline is not consulted until the slice has
+  // already overrun it -- at ~0.006 ms per element a floor of 20,000 was 120 ms
+  // of frozen page per slice, twice the whole idle budget it was meant to
+  // respect. This floor guarantees progress; the deadline decides the rest.
+  var MIN_PER_SLICE = 2000;
 
   var SELF_TEXT = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'OPTION', 'SUMMARY']);
   var SKIP = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'TITLE', 'BR', 'NOSCRIPT']);
@@ -59,14 +59,55 @@ Lumen.repair = (function () {
   // and those are exactly the cells whose text has to stay readable.
   var STATE_SUBTREE = 60;
 
-  var ids = new WeakMap();
-  var rules = new Map();        // id -> [[prop, value], ...]
+  // --- markers -------------------------------------------------------------
+  //
+  // How an element is tagged for its rules decides what the whole extension
+  // costs, because it decides how the browser matches those rules.
+  //
+  // Every rule used to be `[data-lumen-r="17"]`, one per repaired element, all
+  // sharing the attribute *name*. Chromium buckets rules by the name, so a
+  // shared name is one bucket holding every rule we emit, and every element
+  // carrying the attribute is matched against all of them: 19,000 rules on
+  // 27,000 elements is quadratic, and a style recalculation that should take
+  // 80 ms took 2.6 seconds. Every hover paid it twice.
+  //
+  // Two things fix it, and both matter:
+  //
+  //   - the id goes in the attribute *name* (`[data-lumen-g17]`), so each rule
+  //     lands in its own bucket and matching is linear again;
+  //   - elements needing the same declarations share one rule, which is the
+  //     overwhelming majority of them -- a page has thousands of repaired
+  //     elements but only dozens of distinct corrections. The sheet stops
+  //     growing with the document.
+  //
+  // Specificity is unchanged: `[data-lumen-g17]` repeated three times is (0,3,0)
+  // exactly as the old selector was, so every cascade decision behaves the same.
+  var ATTR_GROUP = 'data-lumen-g';
+  var ATTR_UNIQUE = 'data-lumen-u';
+
+  var baseDecls = new WeakMap();  // element -> [[prop, value], ...]
+  var groupOf = new WeakMap();    // element -> group id currently marked on it
+  var groupIds = new Map();       // declaration body -> group id
+  var groupSerial = 0;
+
+  // Unique ids are handed out lazily, only to elements that actually take part
+  // in a state rule -- a few hundred on a page where every element has a group.
+  var ids = new WeakMap();      // element -> unique id
   var stateRules = new Map();   // "id|state|scope" -> { sel, decls }
+  var stateIndex = new Map();   // unique id -> Set of keys mentioning it
   var marks = new WeakMap();    // element -> { ':hover': true, ... } already probed
+  var verified = new WeakMap(); // element -> decls last confirmed to have applied
   var touched = [];             // elements given a rule by the last scan
   var committed = 0;            // how far through `touched` commit() has got
   var escalated = [];           // inline overrides, with what to put back
   var serial = 0;
+
+  // Cached sheet text. The base sheet only changes when a correction the page
+  // has never needed before turns up, so after the first pass it is handed back
+  // untouched and a hover never re-parses it.
+  var baseCss = '';
+  var stateCss = '';
+  var stateDirty = true;
 
   /**
    * Put back every inline property we escalated, exactly as we found it. Done
@@ -85,24 +126,51 @@ Lumen.repair = (function () {
   function reset() {
     restore();
     pendingState = null;
-    lastCss = '';
+    baseDecls = new WeakMap();
+    groupIds.clear();
     ids = new WeakMap();
-    rules.clear();
     stateRules.clear();
+    stateIndex.clear();
     marks = new WeakMap();
+    verified = new WeakMap();
     touched = [];
     committed = 0;
-    // `serial` is deliberately NOT reset. Elements keep their data-lumen-r
-    // attribute across a reset, so restarting the counter would hand a fresh
-    // element an id that a stale attribute elsewhere still carries, and one
-    // rule would then style two unrelated elements.
+    baseCss = '';
+    stateCss = '';
+    stateDirty = true;
+    // `groupSerial` and `serial` are deliberately NOT reset, and `groupOf` is
+    // deliberately kept. Elements keep their marker attributes across a reset,
+    // so restarting a counter would hand a fresh element an id that a stale
+    // attribute elsewhere still carries, and one rule would then style two
+    // unrelated elements. Keeping `groupOf` is what lets the next pass strip
+    // each element's stale attribute as it re-marks it, instead of leaving one
+    // behind per palette change.
   }
 
-  /** Strip the marker attributes; used on teardown so the DOM is left clean. */
+  /**
+   * Strip the marker attributes; used on teardown so the DOM is left clean.
+   *
+   * The ids live in attribute names rather than values, so there is no single
+   * selector that finds them and this walks the document instead. It runs once,
+   * when the extension is switched off.
+   */
   function clean(root) {
     restore();
-    var marked = (root || document).querySelectorAll('[data-lumen-r]');
-    for (var i = 0; i < marked.length; i++) marked[i].removeAttribute('data-lumen-r');
+    var all = (root || document).querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var attrs = all[i].attributes;
+      var doomed = null;
+      for (var j = 0; j < attrs.length; j++) {
+        var name = attrs[j].name;
+        if (name.lastIndexOf(ATTR_GROUP, 0) === 0 || name.lastIndexOf(ATTR_UNIQUE, 0) === 0) {
+          (doomed || (doomed = [])).push(name);
+        }
+      }
+      if (doomed) {
+        for (var k = 0; k < doomed.length; k++) all[i].removeAttribute(doomed[k]);
+      }
+    }
+    groupOf = new WeakMap();
   }
 
   // --- contrast ------------------------------------------------------------
@@ -314,31 +382,50 @@ Lumen.repair = (function () {
   function commit() {
     for (var i = committed; i < touched.length; i++) {
       var el = touched[i].el;
-      var id = idFor(el);
       // A base rule that moved invalidates everything measured against it, so
       // the element's state rules go and it becomes probeable again.
-      if (!sameDecls(rules.get(id), touched[i].decls)) {
-        rules.set(id, touched[i].decls);
-        dropStates(id);
-        marks.delete(el);
-      }
+      if (sameDecls(baseDecls.get(el), touched[i].decls)) continue;
+      baseDecls.set(el, touched[i].decls);
+      group(el, touched[i].decls);
+      dropStatesFor(el);
+      marks.delete(el);
+      verified.delete(el);
     }
     committed = touched.length;
   }
 
-  /** Assign the marker attribute an element's rules are keyed by. */
-  function idFor(el) {
-    var id = ids.get(el);
-    if (id === undefined) {
-      id = ++serial;
-      ids.set(el, id);
-      el.setAttribute('data-lumen-r', id);
+  function body(decls) {
+    var out = '';
+    for (var i = 0; i < decls.length; i++) {
+      out += decls[i][0] + ':' + decls[i][1] + ' !important;';
     }
-    return id;
+    return out;
   }
 
   /**
-   * Selector for one element's rules, repeated `times` for the specificity.
+   * Put `el` in the group for these declarations, creating the group -- and the
+   * one rule that serves every element in it -- the first time this particular
+   * correction is needed anywhere on the page.
+   */
+  function group(el, decls) {
+    var text = body(decls);
+    var gid = groupIds.get(text);
+    if (gid === undefined) {
+      gid = ++groupSerial;
+      groupIds.set(text, gid);
+      // Append rather than rebuild: the base sheet is the big one, and after the
+      // first pass over a page this is the only thing that ever touches it.
+      baseCss += selector(ATTR_GROUP + gid, 3) + '{' + text + '}';
+    }
+    var old = groupOf.get(el);
+    if (old === gid) return;
+    if (old !== undefined) el.removeAttribute(ATTR_GROUP + old);
+    el.setAttribute(ATTR_GROUP + gid, '');
+    groupOf.set(el, gid);
+  }
+
+  /**
+   * Selector for one marker attribute, repeated `times` for the specificity.
    *
    * Three is enough to beat the ordinary class-based rule that caused a miss.
    * A rule scoped to an ancestor's state spends six, and an element's own state
@@ -346,22 +433,73 @@ Lumen.repair = (function () {
    * child, and it is the one measured with the child itself in the state that
    * is right.
    */
-  function rep(id, times) {
-    var sel = '[data-lumen-r="' + id + '"]';
+  function selector(attr, times) {
+    var sel = '[' + attr + ']';
     var out = '';
     for (var i = 0; i < (times || 3); i++) out += sel;
     return out;
   }
 
+  /** Selector for one element's own state rules, by its unique id. */
+  function rep(id, times) {
+    return selector(ATTR_UNIQUE + id, times);
+  }
+
+  /**
+   * Assign the unique marker a state rule is keyed by. Only elements that take
+   * part in one ever get it, so this stays a small population.
+   */
+  function idFor(el) {
+    var id = ids.get(el);
+    if (id === undefined) {
+      id = ++serial;
+      ids.set(el, id);
+      el.setAttribute(ATTR_UNIQUE + id, '');
+    }
+    return id;
+  }
+
+  /**
+   * Forget every state rule that mentions `id`, either as its subject or as the
+   * ancestor it is scoped to. The index exists so this costs the number of rules
+   * actually affected rather than a walk of all of them -- a scan that moves a
+   * few thousand base rules used to pay that walk once per element.
+   */
   function dropStates(id) {
-    if (!stateRules.size) return;
-    var own = id + '|';
-    var scoped = '|' + id;
-    stateRules.forEach(function (rule, key) {
-      if (key.indexOf(own) === 0 || key.slice(-scoped.length) === scoped) {
-        stateRules.delete(key);
-      }
+    var keys = stateIndex.get(id);
+    if (!keys) return;
+    // A copy: unindex() deletes from this very set as it goes.
+    Array.from(keys).forEach(function (key) {
+      if (stateRules.delete(key)) stateDirty = true;
+      unindex(key);
     });
+  }
+
+  function dropStatesFor(el) {
+    var id = ids.get(el);
+    if (id !== undefined) dropStates(id);
+  }
+
+  function index(key, own, scope) {
+    var add = function (id) {
+      var set = stateIndex.get(id);
+      if (!set) stateIndex.set(id, (set = new Set()));
+      set.add(key);
+    };
+    add(own);
+    if (scope) add(scope);
+  }
+
+  function unindex(key) {
+    var parts = key.split('|');
+    var drop = function (id) {
+      var set = stateIndex.get(Number(id));
+      if (!set) return;
+      set.delete(key);
+      if (!set.size) stateIndex.delete(Number(id));
+    };
+    drop(parts[0]);
+    if (parts[2] && parts[2] !== '0') drop(parts[2]);
   }
 
   /** Same properties, same colours — whatever notation each is written in. */
@@ -410,10 +548,9 @@ Lumen.repair = (function () {
 
   /**
    * Scan `roots` (document order, so parents are memoised before their
-   * children) and return the full repair stylesheet.
+   * children); the resulting rules are read back with base() and states().
    */
   var pendingState = null;
-  var lastCss = '';
 
   /** True when a scan ran out of time and still has elements to visit. */
   function pending() {
@@ -429,11 +566,12 @@ Lumen.repair = (function () {
    * Scan `roots` in document order, so a parent is always memoised before its
    * children need its background.
    *
-   * `deadline` is optional and returns the milliseconds left in the current idle
-   * slice. When it runs out the scan saves its place and returns what it has so
-   * far; `pending()` then reports that there is more to do. Splitting the work
-   * this way keeps a 20,000-element page from blocking the main thread for a
-   * quarter of a second in one go.
+   * `deadline` returns the milliseconds left in the current slice. When it runs
+   * out the scan saves its place and returns with what it has committed so far;
+   * `pending()` then reports that there is more to do. Splitting the work this
+   * way keeps a large page from blocking the main thread in one go -- so it is
+   * passed even on the synchronous path, where it is a plain wall-clock budget
+   * rather than the browser's idle estimate.
    */
   function scan(roots, cfg, deadline) {
     var st = pendingState;
@@ -488,8 +626,7 @@ Lumen.repair = (function () {
             // seconds, and every surface needing repair stays white for all of
             // it. commit() only walks the new entries, so this stays cheap.
             commit();
-            lastCss = serialize();
-            return lastCss;
+            return;
           }
         }
       }
@@ -498,8 +635,6 @@ Lumen.repair = (function () {
 
     pendingState = null;
     commit();
-    lastCss = serialize();
-    return lastCss;
   }
 
   // --- interaction states --------------------------------------------------
@@ -518,12 +653,12 @@ Lumen.repair = (function () {
   // `.row:hover`, and the first thing the pointer does is paint it white.
   //
   // Both are answered by measuring the state itself, while the element is in it.
-  // The one trick needed is `unmask`: our repair sheet is switched off for the
+  // The one trick needed is unmasking: our own corrections are lifted for the
   // duration of the read, so what comes back is the page's real colour for this
-  // state rather than our own correction of the resting one. It all happens
-  // inside the event handler, and the browser paints only when a task ends, so
-  // nothing intermediate is ever on screen and the fix lands in the same frame
-  // the state does.
+  // state rather than our correction of the resting one. It all happens inside
+  // the event handler, and the browser paints only when a task ends, so nothing
+  // intermediate is ever on screen and the fix lands in the same frame the state
+  // does.
 
   function matchesState(el, state) {
     try {
@@ -561,9 +696,13 @@ Lumen.repair = (function () {
     for (var p = root; p && p.nodeType === 1; p = p.parentElement) chain.push(p);
     for (var i = chain.length - 1; i >= 0; i--) add(chain[i], null);
 
-    var kids = root.querySelectorAll('*');
-    var n = Math.min(kids.length, STATE_SUBTREE);
-    for (var j = 0; j < n; j++) add(kids[j], root);
+    // A TreeWalker rather than querySelectorAll('*'): only STATE_SUBTREE of the
+    // descendants are ever looked at, and materialising a list of all of them
+    // first is the whole cost of a hover on a large container.
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    for (var j = 0, node; j < STATE_SUBTREE && (node = walker.nextNode()); j++) {
+      add(node, root);
+    }
   }
 
   /**
@@ -596,6 +735,36 @@ Lumen.repair = (function () {
     return sameDecls(base, want) ? null : want;
   }
 
+  /**
+   * Run `read` with our corrections lifted from the elements it is about to
+   * measure -- by taking their marker attributes off, so the rules stop matching
+   * them, and putting them back afterwards.
+   *
+   * Disabling the whole sheet would do the same thing and used to, but a
+   * disabled sheet invalidates style for every element in the document: on a
+   * large page that was two full style recalculations, ~55 ms, for a read of
+   * seventy elements. Removing an attribute invalidates only the element that
+   * carried it. Every ancestor a measurement depends on is in the list, so the
+   * elements unmasked are exactly the ones being judged.
+   */
+  function unmasked(list, read) {
+    var stripped = [];
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i].el;
+      var gid = groupOf.get(el);
+      if (gid !== undefined) stripped.push(el, ATTR_GROUP + gid);
+      var uid = ids.get(el);
+      if (uid !== undefined) stripped.push(el, ATTR_UNIQUE + uid);
+    }
+    if (!stripped.length) return read();
+    for (var j = 0; j < stripped.length; j += 2) stripped[j].removeAttribute(stripped[j + 1]);
+    try {
+      return read();
+    } finally {
+      for (var k = 0; k < stripped.length; k += 2) stripped[k].setAttribute(stripped[k + 1], '');
+    }
+  }
+
   function measureProbe(list, state, cfg) {
     var pageBg = C.hslToRgb(0, 0, cfg.bgMin);
     pageBg.a = 1;
@@ -610,8 +779,7 @@ Lumen.repair = (function () {
       if (!el.isConnected) continue;
       var cs = getComputedStyle(el);
       var decls = measure(el, cs, cfg, memo, pageBg);
-      var id = ids.get(el);
-      var base = (id === undefined ? null : rules.get(id)) || null;
+      var base = baseDecls.get(el) || null;
       found.push({
         el: el,
         scope: list[i].scope,
@@ -623,27 +791,31 @@ Lumen.repair = (function () {
     var changed = false;
     for (var j = 0; j < found.length; j++) {
       var hit = found[j];
-      var known = ids.get(hit.el);
 
       if (!state) {
         // The page restyled the element; whatever we corrected it to was
         // measured against colours it no longer has.
         if (!hit.decls.length) {
           if (hit.base) {
-            rules.delete(known);
-            dropStates(known);
+            baseDecls.delete(hit.el);
+            ungroup(hit.el);
+            dropStatesFor(hit.el);
             marks.delete(hit.el);
+            verified.delete(hit.el);
             changed = true;
           }
         } else if (!sameDecls(hit.base, hit.decls)) {
-          known = idFor(hit.el);
-          rules.set(known, hit.decls);
-          dropStates(known);
+          baseDecls.set(hit.el, hit.decls);
+          group(hit.el, hit.decls);
+          dropStatesFor(hit.el);
           marks.delete(hit.el);
+          verified.delete(hit.el);
           changed = true;
         }
         continue;
       }
+
+      var known = ids.get(hit.el);
 
       if (hit.decls) {
         known = idFor(hit.el);
@@ -657,16 +829,23 @@ Lumen.repair = (function () {
               : rep(known, 7) + state,
             decls: hit.decls
           });
+          index(key, known, root);
           changed = true;
+          stateDirty = true;
         }
       } else if (known !== undefined) {
         // The state wants nothing beyond the resting rules, so drop any rule a
         // previous probe left. A scope with no id of its own has never had a
         // rule keyed to it, and must not be defaulted to 0 -- that is the key of
         // the element's *own* state rule, which is a different measurement.
-        var root = hit.scope ? ids.get(hit.scope) : 0;
-        if (root !== undefined) {
-          if (stateRules.delete(known + '|' + state + '|' + root)) changed = true;
+        var root2 = hit.scope ? ids.get(hit.scope) : 0;
+        if (root2 !== undefined) {
+          var gone = known + '|' + state + '|' + root2;
+          if (stateRules.delete(gone)) {
+            unindex(gone);
+            changed = true;
+            stateDirty = true;
+          }
         }
       }
     }
@@ -674,28 +853,37 @@ Lumen.repair = (function () {
     return changed;
   }
 
+  /** Take an element out of its declaration group; it needs no rule any more. */
+  function ungroup(el) {
+    var gid = groupOf.get(el);
+    if (gid === undefined) return;
+    el.removeAttribute(ATTR_GROUP + gid);
+    groupOf.delete(el);
+  }
+
   /**
-   * Re-measure live elements and update their rules. Returns the new stylesheet
-   * text, or null when nothing moved and the caller can leave the sheet alone.
+   * Re-measure live elements and update their rules. Returns true when something
+   * moved; false when nothing did and the caller can leave the sheets alone.
    *
    * `state` is '' to refresh the ordinary rules — the page restyled the element,
    * so whatever we corrected it to is now measured against the wrong thing — or
    * a pseudo-class the element is matching *right now*, in which case that is
    * what gets measured and the rules are emitted scoped to it.
    *
-   * `unmask(read)` must run `read` with our repair sheet disabled. It is only
-   * used when one of the elements involved actually carries a rule of ours,
-   * since disabling a sheet invalidates style for the whole document and there
-   * is nothing to unmask when we have not touched anything here.
+   * The measurement runs unmasked -- see unmasked() -- so a state is judged by
+   * the page's own colour for it rather than by the correction we already made
+   * for the resting one.
    */
-  function probe(target, state, cfg, unmask) {
-    if (!cfg) return null;
+  function probe(target, state, cfg) {
+    if (!cfg) return false;
     // One entry per element per state, so this only grows with how much of the
     // page has actually been interacted with. Start over rather than let a very
     // long session on a very long list accumulate without bound; the next hover
     // measures what it needs again.
     if (stateRules.size > 4000) {
       stateRules.clear();
+      stateIndex.clear();
+      stateDirty = true;
       marks = new WeakMap();
     }
     var roots = target && target.nodeType === undefined ? target : [target];
@@ -704,19 +892,11 @@ Lumen.repair = (function () {
     for (var i = 0; i < roots.length; i++) {
       collectProbe(roots[i], state, list, seen);
     }
-    if (!list.length) return null;
+    if (!list.length) return false;
 
-    var masked = false;
-    for (var j = 0; j < list.length && !masked; j++) {
-      var id = ids.get(list[j].el);
-      masked = id !== undefined && rules.has(id);
-    }
-
-    var read = function () { return measureProbe(list, state, cfg); };
-    var changed = masked && unmask ? unmask(read) : read();
-    if (!changed) return null;
-    lastCss = serialize();
-    return lastCss;
+    return unmasked(list, function () {
+      return measureProbe(list, state, cfg);
+    }) || false;
   }
 
   /**
@@ -741,13 +921,20 @@ Lumen.repair = (function () {
     for (var i = 0; i < touched.length; i++) {
       var el = touched[i].el;
       if (!el.isConnected) continue;
-      var want = rules.get(ids.get(el));
+      var want = baseDecls.get(el);
       if (!want) continue;
+      // Already confirmed to have landed, and asking for the same thing since.
+      // A page that mutates constantly re-scans constantly, and reading back
+      // every element every time is a second pass as expensive as the first.
+      if (sameDecls(verified.get(el), want)) continue;
       var cs = getComputedStyle(el);
+      var ok = true;
       for (var j = 0; j < want.length; j++) {
         if (matches(cs.getPropertyValue(want[j][0]), want[j][1])) continue;
+        ok = false;
         failures.push({ el: el, prop: want[j][0], value: want[j][1] });
       }
+      if (ok) verified.set(el, want);
     }
 
     // Applied only once the reading is finished, for the same reason commit()
@@ -774,30 +961,38 @@ Lumen.repair = (function () {
            Math.abs(a.b - b.b) < 3 && Math.abs(a.a - b.a) < 0.02;
   }
 
-  function serialize() {
+  /**
+   * The resting rules, one per distinct correction.
+   *
+   * Built by append in group(), never rebuilt: a hover, a restyle or another
+   * scan slice hands back the very same string, so the browser is not asked to
+   * re-parse the largest sheet on the page for a change that is not in it.
+   */
+  function base() {
+    return baseCss;
+  }
+
+  /**
+   * The state rules, in their own sheet.
+   *
+   * They change on every hover of something new, and they are a few hundred
+   * rules against the base sheet's thousands -- keeping them separate is what
+   * makes a hover cost the parse of a small sheet instead of a large one.
+   */
+  function states() {
+    if (!stateDirty) return stateCss;
     var css = '';
-    rules.forEach(function (decls, id) {
-      // Repeated three times on purpose. Among `!important` declarations the
-      // cascade settles ties by specificity before source order, so (0,3,0)
-      // beats the ordinary class-based rule that caused the miss. Anything that
-      // still outranks it is handled by verify() instead.
-      var sel = '[data-lumen-r="' + id + '"]';
-      var body = '';
-      for (var i = 0; i < decls.length; i++) {
-        body += decls[i][0] + ':' + decls[i][1] + ' !important;';
-      }
-      css += sel + sel + sel + '{' + body + '}';
-    });
-    // State rules last, and each already outranks the resting rule it overrides
-    // by the pseudo-class it carries.
     stateRules.forEach(function (rule) {
-      var body = '';
-      for (var i = 0; i < rule.decls.length; i++) {
-        body += rule.decls[i][0] + ':' + rule.decls[i][1] + ' !important;';
-      }
-      css += rule.sel + '{' + body + '}';
+      css += rule.sel + '{' + body(rule.decls) + '}';
     });
-    return css;
+    stateCss = css;
+    stateDirty = false;
+    return stateCss;
+  }
+
+  /** Both sheets as one string. Not used to render; handy for tests. */
+  function serialize() {
+    return base() + states();
   }
 
   return {
@@ -808,6 +1003,8 @@ Lumen.repair = (function () {
     abort: abort,
     reset: reset,
     clean: clean,
+    base: base,
+    states: states,
     serialize: serialize,
     contrast: contrast,
     relLum: relLum,
