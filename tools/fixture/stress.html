@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen stress fixture</title>
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/nocors.css">
+<style>
+  body { background: #fff; color: #1a1d21; font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 20px; }
+  .filler { font-size: 11px; }
+  .hidden-panel { display: none; }
+  .hidden-panel.open { display: block; }
+  input { font: inherit; }
+</style>
+</head>
+<body>
+<h1>Stress fixture</h1>
+
+<!-- 1 + 2: nested table and code from the unreachable sheet -->
+<div><div><div>
+  <table class="data-table" id="t-nested">
+    <tr><th>Header A</th><th>Header B</th></tr>
+    <tr><td>Cell</td><td>Cell</td></tr>
+  </table>
+  <p>Inline <code class="inline" id="c-nested">code element</code> in a paragraph.</p>
+</div></div></div>
+
+<!-- 6: high-specificity !important from the unreachable sheet -->
+<div id="zone">
+  <table class="stubborn" id="t-stub">
+    <tr><th>Stubborn</th><th>Table</th></tr>
+    <tr><td>Cell</td><td>Cell</td></tr>
+  </table>
+  <p>Inline <code class="stubborn" id="c-stub">stubborn code</code> here.</p>
+  <input class="stubborn" id="i-stub" type="text" value="stubborn input">
+</div>
+
+<!-- 3: styled only once a stylesheet arrives long after load -->
+<input class="late-input" id="i-late" type="text" value="late-styled input">
+<div class="late-box" id="b-late">Styled by the late stylesheet.</div>
+
+<!-- 4: hidden at scan time, revealed later by a class change -->
+<div class="hidden-panel" id="panel">
+  <table class="data-table" id="t-hidden">
+    <tr><th>Hidden</th><th>Table</th></tr>
+  </table>
+  <input class="late-input" id="i-hidden" type="text" value="hidden input">
+</div>
+
+<!-- 5: a large DOM ahead of a final table, to probe the element budget -->
+<div id="filler"></div>
+<table class="data-table" id="t-tail">
+  <tr><th>Tail</th><th>Table</th></tr>
+</table>
+
+<script>
+  // ~9000 filler elements, so the tail table sits past the repair budget.
+  const filler = document.getElementById('filler');
+  let html = '';
+  for (let i = 0; i < 3000; i++) html += '<div class="filler"><span>f' + i + '</span></div>';
+  filler.innerHTML = html;
+
+  // The late stylesheet: arrives well after load and after polling would settle.
+  setTimeout(() => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = '/tools/fixture/stress-late.css';
+    document.head.appendChild(link);
+  }, 2500);
+
+  // Reveal by class change only - no DOM insertion, no style attribute.
+  setTimeout(() => document.getElementById('panel').classList.add('open'), 4000);
+
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t })).catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      Lumen.engine.applySettings({ enabled: true, defaultOn: true, skipDarkSites: false,
+        darkness: 50, contrast: 50, saturation: 50, sites: {} });
+      window.__lumenReady = true;
+    })();
+  }
+
+  window.report = () => {
+    const L = (c) => { const m = String(c).match(/[\d.]+/g); if (!m) return null;
+      const [r,g,b] = m.map(Number).map(v => v/255);
+      return +(((Math.max(r,g,b)+Math.min(r,g,b))/2).toFixed(3)); };
+    const s = (id, p) => getComputedStyle(document.getElementById(id)).getPropertyValue(p);
+    return {
+      'nested table bg':   L(s('t-nested','background-color')),
+      'nested table text': L(s('t-nested','color')),
+      'nested code bg':    L(s('c-nested','background-color')),
+      'nested code text':  L(s('c-nested','color')),
+      'late input bg':     L(s('i-late','background-color')),
+      'late box bg':       L(s('b-late','background-color')),
+      'revealed table bg': L(s('t-hidden','background-color')),
+      'revealed input bg': L(s('i-hidden','background-color')),
+      'tail table bg':     L(s('t-tail','background-color')),
+      'STUB table bg':     L(s('t-stub','background-color')),
+      'STUB table text':   L(s('t-stub','color')),
+      'STUB td text':      L(getComputedStyle(document.querySelector('#t-stub td')).color),
+      'STUB code bg':      L(s('c-stub','background-color')),
+      'STUB code text':    L(s('c-stub','color')),
+      'STUB input bg':     L(s('i-stub','background-color')),
+      'total elements':    document.querySelectorAll('*').length
+    };
+  };
+</script>
+</body>
+</html>

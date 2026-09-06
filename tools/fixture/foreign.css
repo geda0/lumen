@@ -1,0 +1,10 @@
+/* Served from a different origin so document.styleSheets throws on cssRules. */
+.foreign-box {
+  background: #ffffff;
+  color: #202124;
+  border: 1px solid #d0d7de;
+  border-left: 4px solid #0969da;
+  padding: 12px;
+  border-radius: 6px;
+  margin: 16px 0;
+}

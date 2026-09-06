@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — document order</title>
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/nocors.css">
+<style>
+  body { background: #fff; color: #1a1d21; font: 13px system-ui, sans-serif; padding: 12px; }
+  .filler { font-size: 10px; }
+</style>
+</head>
+<body>
+<h1>Document order</h1>
+
+<!-- Identical markup, identical CSS. Only their position differs. -->
+<code class="probe-white" id="head-code">HEAD code — early in document order</code>
+<div class="probe-white" id="head-div">HEAD div</div>
+
+<div id="filler"></div>
+
+<code class="probe-white" id="tail-code">TAIL code — same class, same sheet, far later</code>
+<div class="probe-white" id="tail-div">TAIL div</div>
+<textarea class="probe-white" id="tail-area" rows="1">TAIL textarea</textarea>
+
+<div id="storm-zone">
+  <code class="probe-white" id="storm-code">code that needs the repair pass during a style storm</code>
+</div>
+
+<script>
+  // A big but realistic document: long docs pages and feeds pass 20k elements.
+  const filler = document.getElementById('filler');
+  let html = '';
+  for (let i = 0; i < 12000; i++) html += '<div class="filler"><span>f' + i + '</span></div>';
+  filler.innerHTML = html;
+
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t })).catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      Lumen.engine.applySettings({ enabled: true, defaultOn: true, skipDarkSites: false,
+        darkness: 50, contrast: 50, saturation: 50, sites: {} });
+      window.__lumenReady = true;
+    })();
+  }
+
+  const lum = (c) => { const m = String(c).match(/[\d.]+/g); if (!m) return null;
+    const [r, g, b] = m.map(Number).map(v => v / 255);
+    return (Math.max(r, g, b) + Math.min(r, g, b)) / 2; };
+  const bg = (id) => lum(getComputedStyle(document.getElementById(id)).backgroundColor);
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+  window.runSpec = async () => {
+    const results = [];
+    const expectDark = (name, got) =>
+      results.push({ name, ok: got !== null && got < 0.3, got: +got.toFixed(3) });
+
+    expectDark('A1 head code (early)', bg('head-code'));
+    expectDark('A2 head div (early)', bg('head-div'));
+    // Same class, same stylesheet, same everything -- only further down the page.
+    expectDark('A3 tail code (late in order)', bg('tail-code'));
+    expectDark('A4 tail div (late in order)', bg('tail-div'));
+    expectDark('A5 tail textarea (late in order)', bg('tail-area'));
+
+    // B — a CSS-in-JS style storm. Each insertion triggers work; if that work
+    // is synchronous and unbounded it starves the idle repair pass, and
+    // elements that depend on repair are left white.
+    for (let i = 0; i < 150; i++) {
+      const st = document.createElement('style');
+      st.textContent = '.storm-' + i + '{color:rgb(' + (i % 256) + ',10,10)}';
+      document.head.appendChild(st);
+    }
+    await wait(3500);
+    expectDark('B1 repair-dependent element after style storm', bg('storm-code'));
+
+    const failed = results.filter(r => !r.ok);
+    return { total: results.length, passed: results.length - failed.length,
+             failed: failed.length, failures: failed,
+             elements: document.querySelectorAll('*').length };
+  };
+</script>
+</body>
+</html>

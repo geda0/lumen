@@ -1,0 +1,41 @@
+/* Served without Access-Control-Allow-Origin: unreadable AND unfetchable. */
+.unreachable {
+  background: #ffffff;
+  color: #2b2b2b;
+  border: 1px solid #e5e7eb;
+  padding: 12px;
+  border-radius: 6px;
+  margin: 16px 0;
+}
+
+.split-text {
+  color: #2b2b2b;   /* the background for this lives in the readable sheet */
+}
+
+/* Nested table: background AND colour both come from this unreachable sheet. */
+.data-table { background: #ffffff; color: #000000; border-collapse: collapse; margin: 12px 0; }
+.data-table th, .data-table td { border: 1px solid #d0d7de; padding: 6px 10px; }
+
+/* Code: only the background is here; the colour is inherited from body. */
+code.inline { background: #f6f8fa; padding: 2px 5px; border-radius: 4px; }
+
+/* High-specificity !important in a sheet we cannot rewrite. (1,1,1) beats the
+   repair sheet's (0,3,0) attribute selector, so the fix loses the cascade. */
+#zone table.stubborn { background: #ffffff !important; color: #000000 !important; }
+#zone code.stubborn  { background: #f6f8fa !important; }
+#zone input.stubborn { background: #ffffff !important; color: #111111 !important; }
+
+/* Burst-rendered content: unreachable sheet, plain specificity. */
+.burst-input { background: #ffffff; color: #111111; border: 1px solid #cccccc; }
+.burst-code  { background: #f6f8fa; color: #24292f; padding: 8px; display: block; }
+
+/* Light surface painted by a gradient, with no background-color at all. */
+.grad-input { background-image: linear-gradient(#ffffff, #f2f2f2); border: 1px solid #cccccc; color: #111111; }
+.grad-code  { background-image: linear-gradient(180deg, #f6f8fa 0%, #ffffff 100%); color: #24292f; display: block; padding: 8px; }
+
+/* Batch-rendered rows: unreachable sheet, so only the repair pass can fix them. */
+.batch-code { background: #ffffff; color: #1a1a1a; display: block; padding: 6px; }
+.batch-area { background: #ffffff; color: #1a1a1a; }
+
+/* Probe surfaces: unreachable sheet, so only the repair pass can fix them. */
+.probe-white { background: #ffffff; color: #1a1a1a; padding: 4px; display: block; }

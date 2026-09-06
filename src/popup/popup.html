@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div class="mark" aria-hidden="true"></div>
+    <div class="titles">
+      <h1>Lumen</h1>
+      <p id="site">this page</p>
+    </div>
+  </header>
+
+  <div class="row primary">
+    <label for="site-toggle">
+      <span class="label">Dark mode on this site</span>
+      <span class="hint" id="site-hint">Alt+Shift+D</span>
+    </label>
+    <button id="site-toggle" class="switch" role="switch" aria-checked="false"></button>
+  </div>
+
+  <p class="notice" id="notice" hidden></p>
+
+  <div class="sliders" id="sliders">
+    <div class="slider">
+      <label for="darkness">Darkness <output id="darkness-out"></output></label>
+      <input type="range" id="darkness" min="0" max="100" step="5">
+    </div>
+    <div class="slider">
+      <label for="contrast">Text contrast <output id="contrast-out"></output></label>
+      <input type="range" id="contrast" min="0" max="100" step="5">
+    </div>
+    <div class="slider">
+      <label for="saturation">Color intensity <output id="saturation-out"></output></label>
+      <input type="range" id="saturation" min="0" max="100" step="5">
+    </div>
+  </div>
+
+  <div class="preview" id="preview">
+    <div class="preview-page">
+      <div class="preview-title"></div>
+      <div class="preview-line"></div>
+      <div class="preview-line short"></div>
+      <pre class="preview-code">already dark — kept</pre>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="skip-dark">
+      <span class="label">Skip sites that are already dark</span>
+    </label>
+    <button id="skip-dark" class="switch" role="switch" aria-checked="false"></button>
+  </div>
+
+  <div class="row">
+    <label for="default-on">
+      <span class="label">Enable on new sites by default</span>
+    </label>
+    <button id="default-on" class="switch" role="switch" aria-checked="false"></button>
+  </div>
+
+  <footer>
+    <button id="reset" class="link">Reset appearance</button>
+    <button id="master" class="link danger">Turn off everywhere</button>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

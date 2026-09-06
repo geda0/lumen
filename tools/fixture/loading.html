@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — loading order</title>
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/nocors.css">
+<style>
+  body { background: #fff; color: #1a1d21; font: 14px system-ui, sans-serif; padding: 16px; }
+  pre, code, textarea { font: 12px ui-monospace, monospace; }
+  #t3-code { padding: 6px; display: block; }
+</style>
+</head>
+<body>
+<h1>Loading order</h1>
+
+<pre id="t1-code">T1 — styled white by a stylesheet that arrives late</pre>
+<textarea id="t4-area" rows="2">T4 — textarea styled white by a late stylesheet</textarea>
+<code id="t3-code">T3 — styled white via insertRule long after polling settles</code>
+<div id="t2-host"></div>
+
+<script>
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t })).catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      Lumen.engine.applySettings({ enabled: true, defaultOn: true, skipDarkSites: false,
+        darkness: 50, contrast: 50, saturation: 50, sites: {} });
+      window.__lumenReady = true;
+    })();
+  }
+
+  const lum = (c) => { const m = String(c).match(/[\d.]+/g); if (!m) return null;
+    const [r, g, b] = m.map(Number).map(v => v / 255);
+    return (Math.max(r, g, b) + Math.min(r, g, b)) / 2; };
+  const bg = (id) => lum(getComputedStyle(document.getElementById(id)).backgroundColor);
+  // A macrotask boundary, not requestAnimationFrame: a hidden/throttled tab
+  // never paints, so rAF never fires there. This still lands long before the
+  // 40ms rebuild debounce, so it answers the same question -- has the new CSS
+  // been converted by the time control returns to the page?
+  const frame = () => new Promise(r => setTimeout(r, 0));
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+  window.runSpec = async () => {
+    const results = [];
+    const expectDark = (name, got) =>
+      results.push({ name, ok: got !== null && got < 0.3, got: +got.toFixed(3) });
+
+    // T1 — a stylesheet added late. The check runs inside requestAnimationFrame,
+    // so it sees exactly what the very next paint will show: if this is light,
+    // the user watches the block flash white and then inverta.
+    const s1 = document.createElement('style');
+    s1.textContent = '#t1-code{background:#ffffff;color:#1a1a1a}';
+    document.head.appendChild(s1);
+    await frame();
+    expectDark('T1 late <style>, first painted frame', bg('t1-code'));
+    await wait(1200);
+    expectDark('T1b late <style>, after settling', bg('t1-code'));
+
+    // T4 — same, for a textarea.
+    const s4 = document.createElement('style');
+    s4.textContent = '#t4-area{background:#ffffff;color:#1a1a1a}';
+    document.head.appendChild(s4);
+    await frame();
+    expectDark('T4 late <style> on textarea, first frame', bg('t4-area'));
+
+    // T2 — one big batch of nodes, no stylesheet involved, styled only by the
+    // unreachable sheet so nothing but the repair pass can save them.
+    const host = document.getElementById('t2-host');
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < 60; i++) {
+      const row = document.createElement('div');
+      row.innerHTML = '<code class="batch-code" id="t2-code-' + i + '">batch ' + i + '</code>' +
+                      '<textarea class="batch-area" id="t2-area-' + i + '">area ' + i + '</textarea>';
+      frag.appendChild(row);
+    }
+    host.appendChild(frag);
+    await wait(2500);
+    for (const i of [0, 20, 41, 55, 59]) {
+      expectDark('T2 batch code #' + i, bg('t2-code-' + i));
+      expectDark('T2 batch textarea #' + i, bg('t2-area-' + i));
+    }
+
+    // T3 — a rule injected with insertRule long after the sheet poller settles.
+    // No DOM mutation at all, so nothing but polling can notice it.
+    await wait(9000);
+    document.styleSheets[1].insertRule('#t3-code{background:#ffffff;color:#1a1a1a}', 0);
+    await wait(3000);
+    expectDark('T3 insertRule after poller settles', bg('t3-code'));
+
+    const failed = results.filter(r => !r.ok);
+    return { total: results.length, passed: results.length - failed.length,
+             failed: failed.length, failures: failed };
+  };
+</script>
+</body>
+</html>

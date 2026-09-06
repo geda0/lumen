@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — white inputs and code</title>
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/nocors.css">
+<style>
+  body { background: #fff; color: #1a1d21; font: 14px system-ui, sans-serif; padding: 16px; }
+  .scheme-light { color-scheme: light; }
+</style>
+</head>
+<body>
+<h1>White inputs and code</h1>
+
+<!-- A: inside an open shadow root, where the computed-style repair never walks -->
+<x-panel id="panel"></x-panel>
+
+<!-- B: a large burst added in ONE mutation batch -->
+<div id="burst"></div>
+
+<!-- D: a light surface painted by a gradient, no background-color -->
+<input class="grad-input" id="g-input" type="text" value="gradient input">
+<code class="grad-code" id="g-code">gradient code block</code>
+
+<!-- C: an ancestor opting back into the light colour scheme -->
+<div class="scheme-light" id="schemeWrap">
+  <input id="scheme-input" type="text" value="light-scheme input">
+</div>
+
+<script>
+  customElements.define('x-panel', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML =
+        '<style>' +
+        // High specificity + !important: the rule-level override cannot win,
+        // so this needs the computed-style repair to step in.
+        '#box input.f { background:#ffffff !important; color:#111111 !important; }' +
+        '#box pre.c   { background:#f6f8fa !important; color:#24292f !important; }' +
+        '</style>' +
+        '<div id="box">' +
+        '<input class="f" id="s-input" type="text" value="shadow input">' +
+        '<pre class="c" id="s-code">shadow code block</pre>' +
+        '</div>';
+    }
+  });
+
+  // One batch, well past the observer's per-batch cap.
+  setTimeout(() => {
+    const host = document.getElementById('burst');
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < 60; i++) {
+      const row = document.createElement('div');
+      row.innerHTML = '<input class="burst-input" id="b-input-' + i + '" value="row ' + i + '">' +
+                      '<code class="burst-code" id="b-code-' + i + '">code ' + i + '</code>';
+      frag.appendChild(row);
+    }
+    host.appendChild(frag);          // a single childList mutation record
+  }, 2000);
+
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t })).catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      Lumen.engine.applySettings({ enabled: true, defaultOn: true, skipDarkSites: false,
+        darkness: 50, contrast: 50, saturation: 50, sites: {} });
+      window.__lumenReady = true;
+    })();
+  }
+
+  // The suite. Every assertion is "this surface must not still be light".
+  window.runSpec = () => {
+    const lum = (c) => { const m = String(c).match(/[\d.]+/g); if (!m) return null;
+      const [r, g, b] = m.map(Number).map(v => v / 255);
+      return (Math.max(r, g, b) + Math.min(r, g, b)) / 2; };
+    const bgOf = (el) => lum(getComputedStyle(el).backgroundColor);
+    const results = [];
+    const expectDark = (name, el) => {
+      if (!el) return results.push({ name, ok: false, got: 'missing element' });
+      const l = bgOf(el);
+      results.push({ name, ok: l !== null && l < 0.3, got: +l.toFixed(3) });
+    };
+    const shadow = document.getElementById('panel').shadowRoot;
+    expectDark('A1 input in open shadow root', shadow.getElementById('s-input'));
+    expectDark('A2 code in open shadow root', shadow.getElementById('s-code'));
+    for (const i of [0, 5, 39, 40, 41, 59]) {
+      expectDark('B1 burst input #' + i, document.getElementById('b-input-' + i));
+      expectDark('B2 burst code #' + i, document.getElementById('b-code-' + i));
+    }
+    expectDark('C1 input under color-scheme:light', document.getElementById('scheme-input'));
+
+    // D: the light surface is a gradient. background-color is transparent here,
+    // so anything that only looks at background-color sees nothing wrong.
+    const gradLight = (el) => {
+      const img = getComputedStyle(el).backgroundImage;
+      const stops = img.match(/rgba?\([^)]*\)/g) || [];
+      return stops.some(c => lum(c) > 0.6);
+    };
+    for (const [name, id] of [['D1 gradient input', 'g-input'], ['D2 gradient code', 'g-code']]) {
+      const el = document.getElementById(id);
+      results.push({ name, ok: !gradLight(el), got: getComputedStyle(el).backgroundImage.slice(0, 60) });
+    }
+
+    // E: Chrome paints an autofilled field itself; background-color cannot
+    // reach it, so the sheet must carry an explicit autofill rule.
+    const core = (document.getElementById('lumen-core') || {}).textContent || '';
+    results.push({ name: 'E1 autofill rule present', ok: /autofill/i.test(core),
+                   got: /autofill/i.test(core) ? 'present' : 'absent' });
+    const failed = results.filter(r => !r.ok);
+    return { total: results.length, passed: results.length - failed.length,
+             failed: failed.length, failures: failed };
+  };
+</script>
+</body>
+</html>

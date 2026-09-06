@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen fixture</title>
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/foreign.css">
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/nocors.css">
+<style>
+  :root {
+    --page-bg: #ffffff;
+    --card-bg: #f7f8fa;
+    --text-primary: #1a1d21;
+    --text-muted: #5f6b7a;
+    --brand-500: #1a73e8;
+    --line: #dfe3e8;
+    /* Generic names carry no role hint - the hard case for variables. */
+    --gray-200: #e5e7eb;
+    --gray-900: #111827;
+  }
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--text-primary);
+    font: 15px/1.6 system-ui, sans-serif;
+  }
+  nav {
+    background: #111418;           /* ALREADY DARK — must survive */
+    color: #e6e6e6;
+    padding: 12px 24px;
+  }
+  .hero {
+    background: linear-gradient(135deg, #eef4ff 0%, #ffffff 100%);
+    padding: 28px 24px;
+    border-bottom: 1px solid var(--line);
+  }
+  main { padding: 24px; max-width: 640px; }
+  h1 { margin: 0 0 6px; font-size: 24px; }
+  p  { color: var(--text-muted); }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    margin: 16px 0;
+  }
+  pre.code {
+    background: #282c34;           /* ALREADY DARK — must survive */
+    color: #abb2bf;
+    padding: 14px;
+    border-radius: 6px;
+    font: 13px/1.5 ui-monospace, monospace;
+    overflow-x: auto;
+  }
+  .code .kw  { color: #c678dd; }
+  .code .str { color: #98c379; }
+  button {
+    background: var(--brand-500);
+    color: #ffffff;
+    border: 0;
+    padding: 9px 16px;
+    border-radius: 6px;
+    font: inherit;
+  }
+  .icon { fill: #1a1d21; width: 20px; height: 20px; vertical-align: -4px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; }
+  th { background: #eef1f4; }
+  /* A dark surface named with no hint. Must stay dark. */
+  .dark-panel {
+    background: var(--gray-900);
+    color: #e5e7eb;
+    padding: 14px;
+    border-radius: 6px;
+    margin: 16px 0;
+  }
+  /* A shorthand carrying var(): CSSOM never expands it into longhands. */
+  .var-border {
+    border: 1px solid var(--gray-200);
+    padding: 12px;
+    border-radius: 6px;
+    margin: 16px 0;
+  }
+  .split-text { background: #ffffff; padding: 12px; border-radius: 6px; margin: 16px 0; }
+  .nested-a { background: #ffffff; padding: 12px; border-radius: 6px; }
+  .nested-b { background: #f2f4f7; padding: 12px; border-radius: 6px; }
+  .nested-c { background: #ffffff; padding: 12px; border-radius: 6px; }
+  @media (min-width: 300px) {
+    .wide-note { color: #7a4a00; background: #fff8e1; padding: 10px; border-radius: 6px; }
+  }
+</style>
+</head>
+<body>
+<nav id="nav">Already-dark navbar</nav>
+
+<div class="hero">
+  <h1>Luminance inversion test</h1>
+  <p>Light chrome should flip. Dark regions should not.</p>
+</div>
+
+<main>
+  <p style="color: #444; background: #fafafa; padding: 8px;" id="inline">
+    This paragraph is styled with an inline <code>style</code> attribute.
+  </p>
+
+  <div class="card" id="card">
+    <svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/></svg>
+    A card on a light surface.
+    <button id="btn">Primary action</button>
+  </div>
+
+  <pre class="code" id="code"><span class="kw">function</span> greet() {
+  <span class="kw">return</span> <span class="str">"already dark, leave me alone"</span>;
+}</pre>
+
+  <p class="wide-note" id="note">A warning box defined inside a media query.</p>
+
+  <div class="foreign-box" id="foreign">Styled by a cross-origin stylesheet.</div>
+
+  <table>
+    <tr><th>Header</th><th>Header</th></tr>
+    <tr><td>Cell</td><td>Cell</td></tr>
+  </table>
+
+  <p>An image, which must never be inverted:</p>
+  <img id="pic" width="220" height="80" alt="colour bars"
+       src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='80'><rect width='55' height='80' fill='%23e63946'/><rect x='55' width='55' height='80' fill='%23f4a261'/><rect x='110' width='55' height='80' fill='%232a9d8f'/><rect x='165' width='55' height='80' fill='%23264653'/></svg>">
+
+  <div class="dark-panel" id="darkpanel">
+    A dark panel from an unhinted <code>--gray-900</code> variable. Must stay dark.
+  </div>
+
+  <div class="var-border" id="varborder">
+    Border set through <code>border: 1px solid var(--gray-200)</code>.
+  </div>
+
+  <div class="nested-a" id="n1">Nested white, level 1
+    <div class="nested-b" id="n2">level 2
+      <div class="nested-c" id="n3">level 3</div>
+    </div>
+  </div>
+
+  <div class="unreachable" id="unreachable">
+    Styled by a stylesheet that is neither readable nor fetchable.
+  </div>
+
+  <div class="split-text" id="splittext">
+    Background from a readable rule, text colour from the unreachable sheet.
+  </div>
+
+  <div class="cssinjs" id="cssinjs">Styled by insertRule() after load.</div>
+
+  <x-widget id="widget"></x-widget>
+</main>
+
+<script>
+  // Simulates a CSS-in-JS runtime: insertRule() mutates the CSSOM without
+  // touching the DOM, so a MutationObserver never sees it.
+  setTimeout(() => {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync('.cssinjs{background:#ffffff;color:#333333;padding:12px;' +
+                      'border-radius:6px;margin:16px 0}');
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  }, 1200);
+
+  // A web component with its own shadow styles.
+  customElements.define('x-widget', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML =
+        '<style>' +
+        '.box{background:#ffffff;color:#222;border:1px solid #ccc;padding:12px;border-radius:6px;margin-top:16px}' +
+        '</style>' +
+        '<div class="box">Shadow DOM content</div>';
+    }
+  });
+</script>
+
+<script>
+  // Append ?lumen=1 to load the real engine into this page. chrome.runtime is
+  // stubbed (so the cross-origin CSS path still runs) but chrome.storage is not,
+  // which keeps engine.js dormant until we hand it settings explicitly.
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t }))
+                  .catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      Lumen.engine.applySettings({
+        enabled: true, defaultOn: true, skipDarkSites: true,
+        darkness: 50, contrast: 50, saturation: 50, sites: {}
+      });
+      window.__lumenReady = true;
+    })();
+  }
+</script>
+</body>
+</html>
