@@ -18,13 +18,15 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   // Degrade to rule-level conversion alone if the repair module is unavailable,
   // rather than taking the whole engine down with it.
   var REPAIR = Lumen.repair || {
-    scan: function () { return ''; },
-    probe: function () { return null; },
+    scan: function () {},
+    probe: function () { return false; },
     verify: function () { return 0; },
     pending: function () { return false; },
     abort: function () {},
     reset: function () {},
-    clean: function () {}
+    clean: function () {},
+    base: function () { return ''; },
+    states: function () { return ''; }
   };
 
   var DEFAULTS = {
@@ -64,6 +66,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   var sheetCache = new WeakMap();   // CSSStyleSheet -> { count, css, ver }
   var foreignCache = new Map();     // href -> css text | null (failed) | undefined (pending)
   var inlineIndex = new WeakMap();  // Element -> id
+  var inlineCache = new WeakMap();  // Element -> { raw, ver, css }
   var inlineSerial = 0;
   var shadowRoots = new Set();
 
@@ -74,8 +77,33 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   var lastSyncRebuild = 0;
   var SYNC_REBUILD_INTERVAL = 100;
   var repairEl = null;
-  var repairQueue = [];
+  var repairStateEl = null;
+  var repairQueue = new Set();
   var repairScheduled = false;
+  var probeFrame = 0;
+  var probePending = null;
+
+  // How long the synchronous repair pass -- the one that runs when the palette
+  // moves -- may spend measuring before handing the rest to idle slices. The
+  // marker writes that follow are charged to the same task, so the budget is
+  // deliberately well under the frame time it is trying to protect.
+  var SYNC_REPAIR_MS = 50;
+
+  // How often a scan still in progress may publish what it has so far.
+  var REPAIR_PUBLISH_INTERVAL = 250;
+  var lastRepairPublish = 0;
+
+  // A full document walk looking for new shadow roots is too expensive to do on
+  // every rebuild of a large page; newly added subtrees are walked as they
+  // arrive, and this is the backstop for a root attached to an element that was
+  // already there.
+  var SHADOW_SWEEP_INTERVAL = 2000;
+  var lastShadowSweep = 0;
+  var linksDirty = true;
+
+  // Beyond this many separately-added roots in one batch, scanning them one by
+  // one costs more than one pass over the document.
+  var ADDED_ROOT_LIMIT = 400;
 
   var restyleSet = new Set();
   var restyleTimer = 0;
@@ -185,6 +213,37 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     }
   }
 
+  /**
+   * Keep our sheets at the end of the document, in cascade order, and move
+   * nothing when they already are.
+   *
+   * Each of them used to re-append itself whenever it was written, and each in
+   * turn wanted to be last, so a rebuild moved every one of them every time.
+   * appendChild of a node that is already in place is still a mutation, and a
+   * stylesheet moving invalidates style for the whole document: on a large page
+   * that was several full restyles per rebuild to arrive at the order the
+   * document was already in.
+   */
+  function attachOurs() {
+    var root = document.documentElement;
+    if (!root) return;
+    var want = [];
+    if (coreEl) want.push(coreEl);
+    if (inlineEl) want.push(inlineEl);
+    if (repairEl) want.push(repairEl);
+    if (repairStateEl) want.push(repairStateEl);
+    if (!want.length) return;
+
+    var node = root.lastElementChild;
+    for (var i = want.length - 1; i >= 0; i--) {
+      if (node !== want[i]) {
+        for (var j = 0; j < want.length; j++) root.appendChild(want[j]);
+        return;
+      }
+      node = node.previousElementSibling;
+    }
+  }
+
   function isOurs(node) {
     return node && node.nodeType === 1 && node.hasAttribute &&
       node.hasAttribute('data-lumen');
@@ -211,13 +270,13 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   }
 
   function removeAll() {
-    [earlyEl, coreEl, inlineEl, repairEl].forEach(function (el) {
+    [earlyEl, coreEl, inlineEl, repairEl, repairStateEl].forEach(function (el) {
       if (el && el.parentNode) el.parentNode.removeChild(el);
     });
-    earlyEl = coreEl = inlineEl = repairEl = null;
+    earlyEl = coreEl = inlineEl = repairEl = repairStateEl = null;
     REPAIR.reset();
     if (REPAIR.clean) REPAIR.clean(document);
-    repairQueue = [];
+    repairQueue.clear();
     shadowRoots.forEach(function (root) {
       var el = root.querySelector('style[data-lumen]');
       if (el) el.remove();
@@ -397,22 +456,41 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
    * Inline `style` attributes are overridden by tagging the element with an id
    * attribute and emitting `[data-lumen-i="n"] { … !important }`. We never write
    * to `element.style` itself — sites read their own inline styles back.
+   *
+   * The last result is reused when neither the attribute nor the palette has
+   * moved.
+   *
+   * Rebuilds are frequent -- any stylesheet arriving anywhere on the page causes
+   * one -- and a large page carries thousands of inline styles. Re-running the
+   * value rewriter over all of them each time was pure repetition: the cache
+   * turns every rebuild after the first into a string comparison per element.
    */
-  function buildInline() {
+  function inlineFor(el) {
+    var raw = el.getAttribute('style') || '';
+    var hit = inlineCache.get(el);
+    if (hit && hit.raw === raw && hit.ver === cfgVersion) return hit.css;
+
+    var decls = CSS.declarations(el.style, cfg, false);
     var css = '';
-    var nodes = document.querySelectorAll('[style]');
-    for (var i = 0; i < nodes.length; i++) {
-      var el = nodes[i];
-      if (isOurs(el)) continue;
-      var decls = CSS.declarations(el.style, cfg, false);
-      if (!decls) continue;
+    if (decls) {
       var id = inlineIndex.get(el);
       if (id === undefined) {
         id = ++inlineSerial;
         inlineIndex.set(el, id);
         el.setAttribute('data-lumen-i', id);
       }
-      css += '[data-lumen-i="' + id + '"]{' + decls + '}';
+      css = '[data-lumen-i="' + id + '"]{' + decls + '}';
+    }
+    inlineCache.set(el, { raw: raw, ver: cfgVersion, css: css });
+    return css;
+  }
+
+  function buildInline() {
+    var css = '';
+    var nodes = document.querySelectorAll('[style]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (isOurs(nodes[i])) continue;
+      css += inlineFor(nodes[i]);
     }
     return css;
   }
@@ -420,6 +498,10 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   // --- shadow DOM ----------------------------------------------------------
 
   function collectShadowRoots(root) {
+    // The root itself counts: this is called on newly added subtrees, and a
+    // custom element arrives with its shadow root already attached to the very
+    // node that was inserted.
+    if (root.shadowRoot) shadowRoots.add(root.shadowRoot);
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     var node;
     while ((node = walker.nextNode())) {
@@ -448,18 +530,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
         serializeSheet(styles[j].sheet, out, styles[j].href);
       }
       var inline = root.querySelectorAll('[style]');
-      for (var k = 0; k < inline.length; k++) {
-        var el = inline[k];
-        var decls = CSS.declarations(el.style, cfg, false);
-        if (!decls) continue;
-        var id = inlineIndex.get(el);
-        if (id === undefined) {
-          id = ++inlineSerial;
-          inlineIndex.set(el, id);
-          el.setAttribute('data-lumen-i', id);
-        }
-        out.css += '[data-lumen-i="' + id + '"]{' + decls + '}';
-      }
+      for (var k = 0; k < inline.length; k++) out.css += inlineFor(inline[k]);
 
       var el2 = root.querySelector('style[data-lumen]');
       if (!out.css) {
@@ -483,7 +554,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
    * disabled, and bail out when it is already comfortable.
    */
   function detectAlreadyDark() {
-    var ours = [earlyEl, coreEl, inlineEl, repairEl].filter(Boolean);
+    var ours = [earlyEl, coreEl, inlineEl, repairEl, repairStateEl].filter(Boolean);
     ours.forEach(function (el) { if (el.sheet) el.sheet.disabled = true; });
 
     var candidates = [];
@@ -529,20 +600,30 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
 
     if (!coreEl) coreEl = makeStyle('lumen-core');
     if (coreEl.textContent !== out.css) coreEl.textContent = out.css;
-    attach(coreEl);
 
     var inlineCss = buildInline();
     if (!inlineEl) inlineEl = makeStyle('lumen-inline');
     if (inlineEl.textContent !== inlineCss) inlineEl.textContent = inlineCss;
-    attach(inlineEl);
+    attachOurs();
 
     if (earlyEl && earlyEl.parentNode) {
       earlyEl.parentNode.removeChild(earlyEl);
       earlyEl = null;
     }
 
-    trackLinks(document);
-    collectShadowRoots(document.documentElement);
+    if (linksDirty) {
+      linksDirty = false;
+      trackLinks(document);
+    }
+    // Walking every element looking for shadow roots costs as much as the rest
+    // of the rebuild put together on a large page, and rebuilds are frequent.
+    // Subtrees are walked as they arrive (see the observer); this is only the
+    // backstop for a root attached to an element that was already in the DOM.
+    var now = Date.now();
+    if (now - lastShadowSweep >= SHADOW_SWEEP_INTERVAL) {
+      lastShadowSweep = now;
+      collectShadowRoots(document.documentElement);
+    }
     applyShadowRoots();
 
     if (sync) runRepairNow();
@@ -563,26 +644,79 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   function reapply() {
     REPAIR.reset();
     if (repairEl) repairEl.textContent = '';
+    if (repairStateEl) repairStateEl.textContent = '';
     rebuild(true);
   }
 
   /**
-   * A full repair pass with no deadline, so it runs to completion here rather
-   * than yielding to a later idle slice.
+   * Publish whatever the repair module currently has.
+   *
+   * Two sheets rather than one, because they change on completely different
+   * schedules: the resting rules are the big sheet and settle after the first
+   * pass, while the state rules are small and are rewritten every time the
+   * pointer reaches something new. Sharing one element meant every hover made
+   * the browser re-parse the resting rules as well, which on a large page was
+   * most of the cost of hovering at all.
+   */
+  function applyRepairSheets() {
+    lastRepairPublish = performance.now();
+    var css = REPAIR.base();
+    if (!repairEl) repairEl = makeStyle('lumen-repair');
+    if (repairEl.textContent !== css) repairEl.textContent = css;
+
+    var stateCss = REPAIR.states();
+    // Nothing has ever needed a state rule: don't put an empty sheet in the DOM.
+    if (stateCss || repairStateEl) {
+      if (!repairStateEl) repairStateEl = makeStyle('lumen-repair-state');
+      if (repairStateEl.textContent !== stateCss) repairStateEl.textContent = stateCss;
+    }
+    attachOurs(); // repairs must stay the last sheets in the document
+  }
+
+  /**
+   * Publish mid-scan, but not after every slice.
+   *
+   * Changing a stylesheet invalidates style for the whole document, and on a
+   * large one that is tens of milliseconds -- more than the slice that produced
+   * the change. Publishing every slice meant a scan spent most of its budget
+   * paying for its own previous instalment, and the more finely it sliced the
+   * worse it got. Progress still shows, just at a rate the page can afford.
+   */
+  function publishRepairProgress() {
+    if (performance.now() - lastRepairPublish < REPAIR_PUBLISH_INTERVAL) return;
+    applyRepairSheets();
+  }
+
+  /**
+   * The repair pass for a palette change, run here and now rather than handed to
+   * an idle callback -- the page is showing converted colours from the previous
+   * palette and every element still holding one is visibly wrong until this
+   * lands.
+   *
+   * Bounded all the same. Scanning a large document to completion took nearly
+   * three seconds of frozen page on every step of the darkness slider; the
+   * budget covers the top of the document, which is what is on screen, and the
+   * rest follows in idle slices exactly as it does on first load.
    */
   function runRepairNow() {
     REPAIR.abort();
-    repairQueue = [];
-    var css = REPAIR.scan([document.documentElement], cfg, null);
-    if (!repairEl) repairEl = makeStyle('lumen-repair');
-    repairEl.textContent = css;
-    attach(repairEl);
+    repairQueue.clear();
+    var start = performance.now();
+    REPAIR.scan([document.documentElement], cfg, function () {
+      return SYNC_REPAIR_MS - (performance.now() - start);
+    });
+    applyRepairSheets();
+
+    if (REPAIR.pending()) {
+      scheduleRepairSlice();
+      return;
+    }
     repairSettled = true;
     if (REPAIR.verify() > 0 && observer) observer.takeRecords();
 
     // Roots queued while that scan was in flight were held back; nothing else
     // will pick them up, so schedule the follow-up here.
-    if (repairQueue.length && !repairScheduled) scheduleRepairSlice();
+    if (repairQueue.size && !repairScheduled) scheduleRepairSlice();
   }
 
   // --- repair --------------------------------------------------------------
@@ -594,9 +728,13 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   function queueRepair(root) {
     if (!active || !root) return;
     if (root === document.documentElement) {
-      repairQueue = [root];
-    } else if (repairQueue[0] !== document.documentElement) {
-      if (repairQueue.indexOf(root) === -1) repairQueue.push(root);
+      repairQueue.clear();
+      repairQueue.add(root);
+    } else if (!repairQueue.has(document.documentElement)) {
+      // A Set, not an array: a page that streams content in queues hundreds of
+      // roots between slices, and the linear scan that used to dedupe them was
+      // quadratic in exactly the case that produces them.
+      repairQueue.add(root);
     }
     // Deliberately does not abort a scan already in progress: restarting it on
     // every rebuild is how a busy page starves the pass out of ever finishing.
@@ -616,29 +754,48 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     };
     // Continue a scan already in progress promptly; the page still has
     // unconverted surfaces on screen until it finishes.
-    var timeout = REPAIR.pending() ? 150 : 700;
-    if (window.requestIdleCallback) requestIdleCallback(run, { timeout: timeout });
-    else setTimeout(run, REPAIR.pending() ? 0 : 150);
+    var resuming = REPAIR.pending();
+    var timeout = resuming ? 150 : 700;
+    if (!window.requestIdleCallback) {
+      setTimeout(run, resuming ? 0 : 150);
+      return;
+    }
+    if (!resuming) {
+      requestIdleCallback(run, { timeout: timeout });
+      return;
+    }
+    // An idle callback requested from inside an idle callback is served in the
+    // same idle period, so seventeen well-behaved 50 ms slices ran back to back
+    // as two 200 ms tasks and nothing in between could be handled. The timeout
+    // is only there to end the task; the work still waits for idle inside it.
+    setTimeout(function () {
+      requestIdleCallback(run, { timeout: timeout });
+    }, 0);
   }
 
   function runRepair(idle) {
     if (!active || !cfg) return;
     var resuming = REPAIR.pending();
-    var roots = repairQueue.length ? repairQueue : [document.documentElement];
-    if (!resuming) repairQueue = [];
+    var roots = repairQueue.size
+      ? Array.from(repairQueue)
+      : [document.documentElement];
+    if (!resuming) repairQueue.clear();
+    // Without an idle deadline the slice still gets a wall-clock one: a
+    // setTimeout fallback is not licence to hold the main thread for as long as
+    // the document happens to be.
+    var start = performance.now();
     var deadline = idle && idle.timeRemaining
       ? function () { return idle.timeRemaining(); }
-      : null;
-    var css = REPAIR.scan(roots, cfg, deadline);
-    if (!repairEl) repairEl = makeStyle('lumen-repair');
-    if (repairEl.textContent !== css) repairEl.textContent = css;
-    attach(repairEl); // must stay the last sheet in the document
+      : function () { return SYNC_REPAIR_MS - (performance.now() - start); };
+    REPAIR.scan(roots, cfg, deadline);
 
     if (REPAIR.pending()) {
       // Ran out of idle time with elements left; pick up where we stopped.
+      publishRepairProgress();
       scheduleRepairSlice();
       return;
     }
+    applyRepairSheets();
     repairSettled = true;
 
     // Read back what the sheet actually achieved. Where an author rule outranks
@@ -649,7 +806,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
 
     // Roots queued while that scan was in flight were held back; nothing else
     // will pick them up, so schedule the follow-up here.
-    if (repairQueue.length && !repairScheduled) scheduleRepairSlice();
+    if (repairQueue.size && !repairScheduled) scheduleRepairSlice();
   }
 
   // --- interaction states --------------------------------------------------
@@ -662,23 +819,6 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   //
   // Both are handled by measuring the state while the element is actually in it.
 
-  /**
-   * Run `read` with our repair sheet switched off, so what it measures is the
-   * page's own colour rather than the correction we already made. Everything
-   * happens inside one task and the browser paints only when a task ends, so the
-   * unmasked state is never on screen.
-   */
-  function unmask(read) {
-    var sheet = repairEl && repairEl.sheet;
-    if (!sheet) return read();
-    sheet.disabled = true;
-    try {
-      return read();
-    } finally {
-      sheet.disabled = false;
-    }
-  }
-
   function applyProbe(target, state) {
     if (!active || !cfg || !REPAIR.probe) return;
     // Only ever an adjustment on top of the resting pass. Probing before that
@@ -687,16 +827,33 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     // the first frame, so `body` is in `:hover` before the page has even
     // finished loading -- and the resting page would then be left uncorrected.
     if (!repairSettled || REPAIR.pending()) return;
-    var css = REPAIR.probe(target, state, cfg, unmask);
-    if (typeof css !== 'string') return;   // nothing moved
-    if (!repairEl) repairEl = makeStyle('lumen-repair');
-    if (repairEl.textContent !== css) repairEl.textContent = css;
-    attach(repairEl);
+    if (!REPAIR.probe(target, state, cfg)) return;   // nothing moved
+    applyRepairSheets();
+  }
+
+  /**
+   * Hover probes are coalesced to one per frame.
+   *
+   * `mouseover` fires for every element the pointer crosses, and on a deeply
+   * nested page a single gesture crosses a great many -- each one asking for a
+   * probe that disables our sheets and so invalidates style for the whole
+   * document. Only the element the pointer ended the frame on is worth
+   * measuring; it is also the only one still in `:hover` by the time we look.
+   */
+  function queueProbe(el, state) {
+    probePending = { el: el, state: state };
+    if (probeFrame) return;
+    probeFrame = requestAnimationFrame(function () {
+      probeFrame = 0;
+      var next = probePending;
+      probePending = null;
+      if (next && next.el.isConnected) applyProbe(next.el, next.state);
+    });
   }
 
   function onHover(e) {
     var el = e.target;
-    if (el && el.nodeType === 1) applyProbe(el, ':hover');
+    if (el && el.nodeType === 1) queueProbe(el, ':hover');
   }
 
   function onFocus(e) {
@@ -776,6 +933,8 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     }
     stateHandlers = null;
     if (restyleTimer) { clearTimeout(restyleTimer); restyleTimer = 0; }
+    if (probeFrame) { cancelAnimationFrame(probeFrame); probeFrame = 0; }
+    probePending = null;
     restyleSet.clear();
   }
 
@@ -877,6 +1036,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
       var needs = false;
       var sheets = false;
       var added = null;
+      var fresh = null;      // genuinely inserted subtrees, not attribute targets
       var restyled = null;
       for (var i = 0; i < records.length; i++) {
         var r = records[i];
@@ -895,7 +1055,9 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
         }
         for (var j = 0; j < r.addedNodes.length; j++) {
           var node = r.addedNodes[j];
-          if (node.nodeType === 1 && !isOurs(node)) (added || (added = [])).push(node);
+          if (node.nodeType !== 1 || isOurs(node)) continue;
+          (added || (added = [])).push(node);
+          (fresh || (fresh = [])).push(node);
         }
         if (!needs) needs = relevant(r.addedNodes) || relevant(r.removedNodes);
         if (!sheets) sheets = touchesSheets(r.addedNodes) || touchesSheets(r.removedNodes);
@@ -909,9 +1071,9 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
         // synchronous path for an occasional stylesheet and let a storm
         // collapse into one debounced rebuild instead.
         var now = Date.now();
+        linksDirty = true;
         if (now - lastSyncRebuild >= SYNC_REBUILD_INTERVAL) {
           lastSyncRebuild = now;
-          trackLinks(document);
           rebuildNow();
         } else {
           scheduleRebuild();
@@ -923,17 +1085,25 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
         // New content still needs checking even when no stylesheet changed:
         // it may be rendered by rules that were already missed once.
         //
-        // Past a certain batch size, queueing each root individually is both
-        // slower than one document pass and -- when the batch is bigger than the
-        // cap -- wrong: the nodes past it were dropped on the floor and stayed
-        // white for good. One fragment of 60 rows arrives as a single record, so
-        // that is not a rare shape.
-        if (added.length > 40) {
+        // Only past a large batch is one document pass the cheaper answer. The
+        // threshold used to be 40, which a single fragment of rows clears --
+        // and rescanning a 30,000-element document because 60 rows arrived is
+        // how an infinite scroll turned into a permanent full-page scan. The
+        // queue is a Set, so the roots themselves cost nothing to hold.
+        if (added.length > ADDED_ROOT_LIMIT) {
           queueRepair(document.documentElement);
         } else {
           for (var k = 0; k < added.length; k++) queueRepair(added[k]);
         }
         armPoll();
+      }
+      // Shadow roots inside new content, found while we are already holding the
+      // subtree, rather than by walking the whole document. Only what was
+      // actually inserted: an element whose `style` attribute changed is in
+      // `added` too, and walking its subtree on every animation frame is the
+      // cost this is here to avoid.
+      if (fresh && fresh.length <= ADDED_ROOT_LIMIT) {
+        for (var f = 0; f < fresh.length; f++) collectShadowRoots(fresh[f]);
       }
       if (restyled) queueRestyle(restyled);
     });
