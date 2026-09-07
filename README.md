@@ -47,9 +47,77 @@ Hue and alpha are always preserved, so brand colours stay recognisable and
 translucent overlays keep compositing correctly. A translucent *white* wash is
 special-cased to stay light enough to still read as a separator.
 
+**Saturation is not preserved — chroma is.** HSL saturation is a *ratio* of the
+chroma available at a given lightness, and that available chroma collapses to
+zero at both ends of the scale. So carrying `s` across a large lightness move
+silently multiplies the colour a surface actually carries. `#f6f8fa` — the
+blue-grey a great many sites use for `pre`, cards and table stripes — is
+`s = 0.29` at `l = 0.97`, which is a chroma of 0.016: white with a hint of cool
+in it. Dropped to `l = 0.08` at the same `s` it arrives at a chroma of 0.046,
+three times the tint it started with, and now at a lightness where the eye reads
+hue easily. Do that to every surface, border and shadow on a page and the result
+is the uniform navy wash dark modes are notorious for.
+
+```
+s' = s · min(1, capacity(l) / capacity(l'))      capacity(l) = 1 − |2l − 1|
+```
+
+Saturated colours are untouched by this — a brand blue moving toward
+mid-lightness only gains room, so it keeps every bit of its saturation — while
+near-neutral greys stay near-neutral, which is what they were. The same rule
+governs the contrast repair, which walks a colour's lightness and would
+otherwise turn a barely-blue grey into a definitely-blue one on the way.
+
 Borders get the background curve clamped into a band that sits a fixed distance
 above the background floor, so a `#ddd` hairline keeps the same visibility at
 every darkness setting instead of collapsing into the page.
+
+### Tint
+
+A dark mode does not have to be grey. The curves land every neutral on a neutral
+dark; a tint pulls those toward a hue you pick — warm grey, slate, ink blue — and
+the picker sets one **per role**, so surfaces, text and borders can each carry
+their own, or none.
+
+The tint is added as a chroma *vector* rather than by rotating hues:
+
+```
+n = 1 − min(1, chroma / 0.15)                        how neutral the colour is
+(x, y) = chroma·(cos h, sin h)  +  amount·n·(cos hₜ, sin hₜ)
+```
+
+A colour carrying no chroma of its own lands exactly on the tint hue. One
+carrying plenty — a brand blue, a red error state, a green diff line — is left
+alone, because a dark mode that rotates brand colours to match a theme is not
+tinting, it is repainting. Everything in between moves by how much room it has,
+and vector addition gets that gradient without special-casing hue wraparound: a
+warm tint on a faintly cool surface *cancels* toward grey rather than flipping it
+180°, which is what you would want and not what a hue lerp would do.
+
+Two things the tint deliberately does not touch:
+
+- **Anything the curve did not move.** A preserved dark region — the code block
+  this whole design is built around keeping byte-for-byte — keeps its own
+  colours, including its own hue. So a warm-tinted page will still show a cool
+  `#282c34` editor block, by construction. Tinting those would also mean emitting
+  an override for every dark colour on the page.
+- **Colours that already have a hue**, per the vector rule above.
+
+Text gets 0.45× the chroma surfaces get, and borders 0.8×: the same chroma that
+reads as a warm surface reads as a colour cast on a paragraph. The colours the
+extension invents rather than converts — the page background, the field surface,
+the selection highlight, the repair pass's idea of what an element is sitting on
+— all run through the same tint, so a tinted site is not sitting on an untinted
+background.
+
+The picker is three hue sliders and a strength slider, not a native
+`<input type="color">`: hue is the only dimension a tint has (the curves own
+lightness, the strength slider owns chroma), and on some platforms opening the
+OS colour dialog from an extension popup dismisses the popup. Each row's swatch
+switches that role's tint off and on and shows the colour it would apply while
+off, so turning one back on is one click and returns the hue that was there.
+The popup loads `color.js` itself, so the swatches and the preview run the same
+code the page does rather than a mirror of it that can drift.
 
 ## How it is applied
 
@@ -145,6 +213,65 @@ teardown puts the element back byte-for-byte. On a typical page this escalates
 nothing; on the stress fixture it escalates exactly three elements while 21 other
 fixes stay in the sheet.
 
+### Interaction states
+
+A page is not a still image. Rows highlight under the pointer, buttons darken
+while pressed, a tab gets `aria-selected` and changes surface. Two separate
+things went wrong there, and both are invisible in a screenshot.
+
+The first is that our own corrections *froze* those states. A repair rule is
+`!important` at (0,3,0), so it also outranks the page's own `.row:hover` rule —
+which we did convert correctly, and which then never got to apply. The element
+simply stopped responding to the pointer. The second is that a state can carry
+colours the resting page never showed us at all: if `.row` came from a
+stylesheet we could not read, so did `.row:hover`, and the first thing the
+pointer does is paint it white.
+
+Neither can be answered from the CSSOM, because the rules that produce them are
+exactly the ones we cannot see. So the state is measured while the element is in
+it — on `mouseover`, `focusin` and `pointerdown` — and the result is emitted
+scoped to that pseudo-class:
+
+```css
+[data-lumen-r="7"]…:hover { background-color: #12181f !important; }
+```
+
+The one trick needed is that the repair sheet is switched **off** for the
+duration of the read. Otherwise what comes back is our own correction of the
+resting state, and the hover looks fine to us while being frozen on screen. A
+sheet toggle plus the read plus the new rule all happen inside the event
+handler, and the browser paints only when a task ends, so nothing intermediate
+is ever shown and the fix lands in the same frame the state does. It costs about
+0.18 ms per element on a 6,000-element page, once per element per state.
+
+Three details are load-bearing:
+
+- **Only ever an adjustment on top of the resting pass.** The pointer is
+  somewhere from the first frame, so `body` is in `:hover` before the page has
+  finished loading; probing then would file the page's *ordinary* corrections
+  under `:hover` and leave the resting page uncorrected. Probes are ignored
+  until a full repair pass has been over the document.
+- **A rule scoped to an ancestor's state must lose to the element's own.**
+  `.row:hover .cell` restyles descendants the pointer is not on, so a hovered
+  element's subtree is measured too and emitted as `[row]:hover [cell]`. Both
+  rules apply when the pointer is on the cell itself, and it is the one measured
+  with the cell in the state that is right — so a self-state rule spends seven
+  copies of the attribute selector against the scoped rule's six.
+- **A class is not a pseudo-class.** `.selected`, `aria-current`, `open` and
+  friends change which of the page's rules apply, with no CSS change to notice
+  and no pseudo-class to scope a rule to. Those come through the
+  `MutationObserver` — which now watches them, having previously watched only
+  `style` — and re-measure the element's *resting* rules through the same
+  unmasked path, because our own stale correction is sitting on top of whatever
+  the page just changed. That path is batched and rate-limited: a busy page
+  rewrites class attributes constantly, and each probe costs a style
+  recalculation.
+
+Selection gets an explicit `::selection` rule in the base sheet, without
+`!important` so that a page which styles its own selection still wins. Chrome's
+dark-mode default is a saturated blue, which on a page whose surfaces we have
+deliberately kept near-neutral is the loudest thing on screen.
+
 ### Every element, in one pass where possible
 
 The scan covers the whole document. There is no total element cap, and the way
@@ -207,9 +334,10 @@ in between is ever put on screen. Splitting that work across an idle callback is
 precisely what made the view flash white and then invert.
 
 Two things keep that affordable. A settings change is only treated as a palette
-change when the darkness, contrast or saturation values actually moved — toggling
-a site or flipping *skip dark sites* leaves every colour where it was, and takes
-a 0.7 ms path instead of a 50 ms one. And the popup coalesces slider writes: the
+change when a value that colours something actually moved — darkness, contrast,
+saturation, or any of the tint settings; toggling a site or flipping *skip dark
+sites* leaves every colour where it was, and takes a 0.7 ms path instead of a
+50 ms one. And the popup coalesces slider writes: the
 preview in the popup updates on every event, while the page follows at a few
 frames a second and lands exactly on release.
 
@@ -228,8 +356,10 @@ frames a second and lands exactly on release.
 - **CSS-in-JS.** Rules added with `insertRule()` (styled-components, emotion, and
   most CSS-in-JS runtimes) change no DOM node and fire no load event, so a
   `MutationObserver` never sees them and the poll is the only thing that ever
-  can. It runs fast while the page is settling and then keeps a slow heartbeat
-  indefinitely — stopping once things go quiet left anything injected later
+  can — which means the poll has to look at `adoptedStyleSheets` too, since a
+  constructed sheet is in neither `document.styleSheets` nor the DOM, and one
+  left out of the signature is one nothing can ever notice. It runs fast while
+  the page is settling and then keeps a slow heartbeat indefinitely — stopping once things go quiet left anything injected later
   light for good. There is no visibility gate on it: the browser already
   throttles timers in a background tab, and gating meant a hidden tab never
   caught up.
@@ -272,6 +402,9 @@ Enable **Developer mode**, choose **Load unpacked**, and select this folder.
 - *Skip sites that are already dark* is on by default.
 - Sliders: **Darkness** (how deep the background floor goes), **Text contrast**
   (how far text is lifted), **Color intensity** (saturation multiplier).
+- **Tint**: a hue per role — surfaces, text, borders — with one strength for all
+  three. Click a swatch to switch that role's tint off or on; drag its slider to
+  pick the hue. Off by default, and *Reset appearance* clears it.
 
 ## Tests
 
@@ -300,6 +433,18 @@ settled. `order.html` puts identical elements at the top and bottom of a
 24,000-element document, so anything that quietly gives up partway through shows
 as one passing and the other failing.
 
+Interaction states cannot be judged from the CSSOM — the only honest question is
+what the pixel is while the pointer is actually on the element — so those have a
+driver that hovers, focuses and presses each surface for real:
+
+```bash
+node tools/states-spec.js          # needs the fixture server above, and Playwright
+```
+
+It covers a hover, a press, a focus and a `.selected` toggle, for states defined
+both in readable CSS and in the unreachable sheet, and asserts of each that it is
+converted *and* that it actually moved off the resting colour.
+
 Then open `http://localhost:8123/tools/fixture/index.html?lumen=1`, and
 `stress.html?lumen=1` for the harder cases: nested tables and code styled by an
 unreachable sheet, high-specificity `!important` rules that outrank the repair
@@ -325,3 +470,10 @@ on any page the extension runs on, which is useful from the devtools console.
   backstop.
 - A page that rewrites an element's inline style after we escalate will win until
   the next pass notices and escalates again.
+- An element that needed an inline escalation keeps its resting colours in every
+  state: an inline `!important` is the last thing in the cascade and cannot be
+  scoped to `:hover`. On a typical page this is nothing; on the stress fixture it
+  is three elements.
+- Interaction states inside open shadow roots are not probed, for the same reason
+  the repair pass does not walk them — and because a pointer event is retargeted
+  to the host before we see it.

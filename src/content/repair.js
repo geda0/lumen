@@ -54,8 +54,15 @@ Lumen.repair = (function () {
   var SELF_TEXT = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'OPTION', 'SUMMARY']);
   var SKIP = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'TITLE', 'BR', 'NOSCRIPT']);
 
+  // How much of a hovered element's subtree is looked at. A rule like
+  // `.row:hover .cell` restyles descendants that the pointer is not itself over,
+  // and those are exactly the cells whose text has to stay readable.
+  var STATE_SUBTREE = 60;
+
   var ids = new WeakMap();
   var rules = new Map();        // id -> [[prop, value], ...]
+  var stateRules = new Map();   // "id|state|scope" -> { sel, decls }
+  var marks = new WeakMap();    // element -> { ':hover': true, ... } already probed
   var touched = [];             // elements given a rule by the last scan
   var committed = 0;            // how far through `touched` commit() has got
   var escalated = [];           // inline overrides, with what to put back
@@ -81,6 +88,8 @@ Lumen.repair = (function () {
     lastCss = '';
     ids = new WeakMap();
     rules.clear();
+    stateRules.clear();
+    marks = new WeakMap();
     touched = [];
     committed = 0;
     // `serial` is deliberately NOT reset. Elements keep their data-lumen-r
@@ -124,9 +133,12 @@ Lumen.repair = (function () {
   }
 
   /**
-   * Walk `rgb` away from `bg` in HSL lightness until it clears `target`. Hue and
-   * saturation are held, so a blue link stays a blue link — it just becomes a
-   * legible one.
+   * Walk `rgb` away from `bg` in HSL lightness until it clears `target`. Hue is
+   * held, so a blue link stays a blue link — it just becomes a legible one.
+   *
+   * Saturation follows the same chroma rule as the main curves: holding `s`
+   * while lightness climbs inflates the colour's real chroma, which is how a
+   * barely-tinted grey comes out of a contrast repair as a distinctly blue one.
    */
   function fixContrast(rgb, bg, target) {
     var flat = rgb.a >= 0.999 ? rgb : blend(rgb, bg);
@@ -140,12 +152,13 @@ Lumen.repair = (function () {
     for (var i = 0; i < 60; i++) {
       l += step;
       if (l > 1 || l < 0) break;
-      var cand = C.hslToRgb(hsl.h, hsl.s, l);
+      var cand = C.hslToRgb(hsl.h, C.chromaSafe(hsl.s, hsl.l, l), l);
       cand.a = rgb.a;
       if (contrast(rgb.a >= 0.999 ? cand : blend(cand, bg), bg) >= target) return cand;
     }
 
-    var edge = C.hslToRgb(hsl.h, hsl.s, up ? 1 : 0);
+    var edgeL = up ? 1 : 0;
+    var edge = C.hslToRgb(hsl.h, C.chromaSafe(hsl.s, hsl.l, edgeL), edgeL);
     edge.a = rgb.a;
     return edge;
   }
@@ -199,8 +212,17 @@ Lumen.repair = (function () {
 
   // --- the pass ------------------------------------------------------------
 
-  function inspect(el, cfg, memo, pageBg) {
-    var cs = getComputedStyle(el);
+  /**
+   * Work out what needs correcting on one element, given the already-measured
+   * backgrounds of its ancestors. Returns the declarations to apply, which is
+   * empty for the overwhelming majority of elements.
+   *
+   * Reading is deliberately separated from writing: this function touches
+   * neither the DOM nor the rule table, which is what lets the same measurement
+   * serve the full document scan, a re-measure after the page restyles an
+   * element, and a probe of a live `:hover` state.
+   */
+  function measure(el, cs, cfg, memo, pageBg) {
     var parent = el.parentElement ? inherited(el.parentElement, memo) : null;
     var under = parent ? parent.bg : pageBg;
 
@@ -268,14 +290,20 @@ Lumen.repair = (function () {
       repairBorders(cs, eff, cfg, missed, decls);
     }
 
-    if (!decls.length) return;
+    return decls;
+  }
 
-    // Deliberately does not write to the DOM. Setting the marker attribute here
-    // would invalidate style, so the next element's getComputedStyle would force
-    // a fresh recalculation of the whole document -- one per repaired element.
-    // On a page with a few hundred repairs that turned a 40 ms pass into 2 s.
-    // The writes are batched in commit() once all the reading is done.
-    touched.push({ el: el, decls: decls });
+  /**
+   * The scan's use of measure(). Deliberately does not write to the DOM: setting
+   * the marker attribute here would invalidate style, so the next element's
+   * getComputedStyle would force a fresh recalculation of the whole document --
+   * one per repaired element. On a page with a few hundred repairs that turned a
+   * 40 ms pass into 2 s. The writes are batched in commit() once all the reading
+   * is done.
+   */
+  function inspect(el, cfg, memo, pageBg) {
+    var decls = measure(el, getComputedStyle(el), cfg, memo, pageBg);
+    if (decls.length) touched.push({ el: el, decls: decls });
   }
 
   /**
@@ -286,15 +314,67 @@ Lumen.repair = (function () {
   function commit() {
     for (var i = committed; i < touched.length; i++) {
       var el = touched[i].el;
-      var id = ids.get(el);
-      if (id === undefined) {
-        id = ++serial;
-        ids.set(el, id);
-        el.setAttribute('data-lumen-r', id);
+      var id = idFor(el);
+      // A base rule that moved invalidates everything measured against it, so
+      // the element's state rules go and it becomes probeable again.
+      if (!sameDecls(rules.get(id), touched[i].decls)) {
+        rules.set(id, touched[i].decls);
+        dropStates(id);
+        marks.delete(el);
       }
-      rules.set(id, touched[i].decls);
     }
     committed = touched.length;
+  }
+
+  /** Assign the marker attribute an element's rules are keyed by. */
+  function idFor(el) {
+    var id = ids.get(el);
+    if (id === undefined) {
+      id = ++serial;
+      ids.set(el, id);
+      el.setAttribute('data-lumen-r', id);
+    }
+    return id;
+  }
+
+  /**
+   * Selector for one element's rules, repeated `times` for the specificity.
+   *
+   * Three is enough to beat the ordinary class-based rule that caused a miss.
+   * A rule scoped to an ancestor's state spends six, and an element's own state
+   * rule therefore has to spend seven: both apply when the pointer is on the
+   * child, and it is the one measured with the child itself in the state that
+   * is right.
+   */
+  function rep(id, times) {
+    var sel = '[data-lumen-r="' + id + '"]';
+    var out = '';
+    for (var i = 0; i < (times || 3); i++) out += sel;
+    return out;
+  }
+
+  function dropStates(id) {
+    if (!stateRules.size) return;
+    var own = id + '|';
+    var scoped = '|' + id;
+    stateRules.forEach(function (rule, key) {
+      if (key.indexOf(own) === 0 || key.slice(-scoped.length) === scoped) {
+        stateRules.delete(key);
+      }
+    });
+  }
+
+  /** Same properties, same colours — whatever notation each is written in. */
+  function sameDecls(a, b) {
+    if (!a || !b) return !a && !b;
+    if (a.length !== b.length) return false;
+    var map = Object.create(null);
+    for (var i = 0; i < a.length; i++) map[a[i][0]] = a[i][1];
+    for (var j = 0; j < b.length; j++) {
+      var v = map[b[j][0]];
+      if (v === undefined || !matches(v, b[j][1])) return false;
+    }
+    return true;
   }
 
   /**
@@ -358,8 +438,9 @@ Lumen.repair = (function () {
   function scan(roots, cfg, deadline) {
     var st = pendingState;
     if (!st) {
-      var pageBg = C.hslToRgb(0, 0, cfg.bgMin);
-      pageBg.a = 1;
+      // The same colour the base sheet paints on <html>, tint included, since
+      // that is what an element with no background of its own is sitting on.
+      var pageBg = C.shade(cfg.bgMin, 'bg', cfg);
       touched = [];
       committed = 0;
       st = {
@@ -418,6 +499,222 @@ Lumen.repair = (function () {
 
     pendingState = null;
     commit();
+    lastCss = serialize();
+    return lastCss;
+  }
+
+  // --- interaction states --------------------------------------------------
+  //
+  // Everything above measures the page at rest. A page is not at rest: rows
+  // highlight under the pointer, buttons darken while pressed, a tab gets
+  // `aria-selected` and changes surface. Two separate things went wrong there.
+  //
+  // The first is that our own corrections *froze* those states. A repair rule is
+  // `!important` at (0,3,0), so it outranks the page's own `.row:hover` rule --
+  // which we did convert correctly, and which then never got to apply. The
+  // element simply stopped responding to the pointer.
+  //
+  // The second is that a state can carry colours the resting page never showed
+  // us at all: if `.row` came from a stylesheet we could not read, so did
+  // `.row:hover`, and the first thing the pointer does is paint it white.
+  //
+  // Both are answered by measuring the state itself, while the element is in it.
+  // The one trick needed is `unmask`: our repair sheet is switched off for the
+  // duration of the read, so what comes back is the page's real colour for this
+  // state rather than our own correction of the resting one. It all happens
+  // inside the event handler, and the browser paints only when a task ends, so
+  // nothing intermediate is ever on screen and the fix lands in the same frame
+  // the state does.
+
+  function matchesState(el, state) {
+    try {
+      return el.matches(state);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * The elements a probe of `root` has to look at: `root` and its ancestors —
+   * which are in the same `:hover` as it is — plus a slice of its subtree, for
+   * the `.row:hover .cell` shape. Ancestors come first so a parent's background
+   * is always measured before the children judged against it.
+   */
+  function collectProbe(root, state, list, seen) {
+    if (!root || root.nodeType !== 1 || !root.isConnected) return;
+    if (state) {
+      if (!matchesState(root, state)) return;
+      var mark = marks.get(root);
+      if (!mark) marks.set(root, (mark = {}));
+      // Already measured in this state, and nothing has invalidated it since.
+      if (mark[state]) return;
+      mark[state] = true;
+    }
+
+    var add = function (el, scope) {
+      if (SKIP.has(el.tagName) || el.hasAttribute('data-lumen')) return;
+      if (seen.has(el)) return;
+      seen.add(el);
+      list.push({ el: el, scope: scope });
+    };
+
+    var chain = [];
+    for (var p = root; p && p.nodeType === 1; p = p.parentElement) chain.push(p);
+    for (var i = chain.length - 1; i >= 0; i--) add(chain[i], null);
+
+    var kids = root.querySelectorAll('*');
+    var n = Math.min(kids.length, STATE_SUBTREE);
+    for (var j = 0; j < n; j++) add(kids[j], root);
+  }
+
+  /**
+   * What a state rule has to say, given what the ordinary rules already say.
+   *
+   * `decls` is the ordinary correction for how the element looks in this state.
+   * On top of that, every property the base rules pin has to be restated at its
+   * real value here — otherwise the correction made for the resting state leaks
+   * into this one and the element never changes colour.
+   *
+   * Returns null when the state wants exactly what the base rules already do,
+   * which is the common case and emits nothing.
+   */
+  function stateDecls(decls, base, cs) {
+    var want = decls.slice();
+    if (base) {
+      var have = Object.create(null);
+      for (var i = 0; i < want.length; i++) have[want[i][0]] = true;
+      for (var j = 0; j < base.length; j++) {
+        var prop = base[j][0];
+        if (have[prop]) continue;
+        var raw = cs.getPropertyValue(prop);
+        // A computed background-image can carry a base64 payload; restating one
+        // is not worth the sheet it would take, so that state keeps the resting
+        // correction instead.
+        if (raw && raw.length < 2000) want.push([prop, raw]);
+      }
+    }
+    if (!want.length) return null;
+    return sameDecls(base, want) ? null : want;
+  }
+
+  function measureProbe(list, state, cfg) {
+    var pageBg = C.shade(cfg.bgMin, 'bg', cfg);
+    var memo = new Map();
+    var found = [];
+
+    // Read everything first. idFor() sets an attribute, which invalidates style
+    // and would make the next getComputedStyle in this loop recalculate the
+    // whole document -- the same trap commit() exists to avoid.
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i].el;
+      if (!el.isConnected) continue;
+      var cs = getComputedStyle(el);
+      var decls = measure(el, cs, cfg, memo, pageBg);
+      var id = ids.get(el);
+      var base = (id === undefined ? null : rules.get(id)) || null;
+      found.push({
+        el: el,
+        scope: list[i].scope,
+        decls: state ? stateDecls(decls, base, cs) : decls,
+        base: base
+      });
+    }
+
+    var changed = false;
+    for (var j = 0; j < found.length; j++) {
+      var hit = found[j];
+      var known = ids.get(hit.el);
+
+      if (!state) {
+        // The page restyled the element; whatever we corrected it to was
+        // measured against colours it no longer has.
+        if (!hit.decls.length) {
+          if (hit.base) {
+            rules.delete(known);
+            dropStates(known);
+            marks.delete(hit.el);
+            changed = true;
+          }
+        } else if (!sameDecls(hit.base, hit.decls)) {
+          known = idFor(hit.el);
+          rules.set(known, hit.decls);
+          dropStates(known);
+          marks.delete(hit.el);
+          changed = true;
+        }
+        continue;
+      }
+
+      if (hit.decls) {
+        known = idFor(hit.el);
+        var root = hit.scope ? idFor(hit.scope) : 0;
+        var key = known + '|' + state + '|' + root;
+        var prev = stateRules.get(key);
+        if (!prev || !sameDecls(prev.decls, hit.decls)) {
+          stateRules.set(key, {
+            sel: root
+              ? rep(root) + state + ' ' + rep(known)
+              : rep(known, 7) + state,
+            decls: hit.decls
+          });
+          changed = true;
+        }
+      } else if (known !== undefined) {
+        // The state wants nothing beyond the resting rules, so drop any rule a
+        // previous probe left. A scope with no id of its own has never had a
+        // rule keyed to it, and must not be defaulted to 0 -- that is the key of
+        // the element's *own* state rule, which is a different measurement.
+        var root = hit.scope ? ids.get(hit.scope) : 0;
+        if (root !== undefined) {
+          if (stateRules.delete(known + '|' + state + '|' + root)) changed = true;
+        }
+      }
+    }
+
+    return changed;
+  }
+
+  /**
+   * Re-measure live elements and update their rules. Returns the new stylesheet
+   * text, or null when nothing moved and the caller can leave the sheet alone.
+   *
+   * `state` is '' to refresh the ordinary rules — the page restyled the element,
+   * so whatever we corrected it to is now measured against the wrong thing — or
+   * a pseudo-class the element is matching *right now*, in which case that is
+   * what gets measured and the rules are emitted scoped to it.
+   *
+   * `unmask(read)` must run `read` with our repair sheet disabled. It is only
+   * used when one of the elements involved actually carries a rule of ours,
+   * since disabling a sheet invalidates style for the whole document and there
+   * is nothing to unmask when we have not touched anything here.
+   */
+  function probe(target, state, cfg, unmask) {
+    if (!cfg) return null;
+    // One entry per element per state, so this only grows with how much of the
+    // page has actually been interacted with. Start over rather than let a very
+    // long session on a very long list accumulate without bound; the next hover
+    // measures what it needs again.
+    if (stateRules.size > 4000) {
+      stateRules.clear();
+      marks = new WeakMap();
+    }
+    var roots = target && target.nodeType === undefined ? target : [target];
+    var list = [];
+    var seen = new Set();
+    for (var i = 0; i < roots.length; i++) {
+      collectProbe(roots[i], state, list, seen);
+    }
+    if (!list.length) return null;
+
+    var masked = false;
+    for (var j = 0; j < list.length && !masked; j++) {
+      var id = ids.get(list[j].el);
+      masked = id !== undefined && rules.has(id);
+    }
+
+    var read = function () { return measureProbe(list, state, cfg); };
+    var changed = masked && unmask ? unmask(read) : read();
+    if (!changed) return null;
     lastCss = serialize();
     return lastCss;
   }
@@ -491,11 +788,21 @@ Lumen.repair = (function () {
       }
       css += sel + sel + sel + '{' + body + '}';
     });
+    // State rules last, and each already outranks the resting rule it overrides
+    // by the pseudo-class it carries.
+    stateRules.forEach(function (rule) {
+      var body = '';
+      for (var i = 0; i < rule.decls.length; i++) {
+        body += rule.decls[i][0] + ':' + rule.decls[i][1] + ' !important;';
+      }
+      css += rule.sel + '{' + body + '}';
+    });
     return css;
   }
 
   return {
     scan: scan,
+    probe: probe,
     verify: verify,
     pending: pending,
     abort: abort,

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — interaction states</title>
+<link rel="stylesheet" href="http://127.0.0.1:8124/tools/fixture/nocors.css">
+<style>
+  body { background: #fff; color: #1a1d21; font: 14px system-ui, sans-serif; padding: 16px; }
+
+  /* The readable half of the suite. These rules ARE converted by the walker, so
+     the question here is not whether the state is dark -- it is whether the
+     state still *changes* once the repair pass has corrected the resting one. */
+  .lit-row { background: #ffffff; color: #1a1a1a; padding: 8px; display: block; }
+  .lit-row:hover { background: #dfe7f3; }
+  .lit-row.selected { background: #cfe0ff; }
+  .lit-btn { background: #f6f8fa; color: #24292f; padding: 6px 12px; border: 1px solid #d0d7de; }
+  .lit-btn:hover { background: #e6ebf1; }
+</style>
+</head>
+<body>
+<h1>Interaction states</h1>
+
+<!-- A: states defined in a sheet we cannot read: they were never converted. -->
+<div class="state-row" id="u-row">unreachable row (hover me)</div>
+<button class="state-btn" id="u-btn">unreachable button</button>
+<input class="state-field" id="u-field" value="unreachable field">
+<div class="state-list" id="u-list"><span class="state-cell" id="u-cell">descendant cell</span></div>
+
+<!-- B: states from readable CSS. Converted correctly, then frozen solid by the
+     repair pass's !important rule for the resting state. -->
+<div class="lit-row" id="r-row">readable row (hover me)</div>
+<button class="lit-btn" id="r-btn">readable button</button>
+
+<script>
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t })).catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      Lumen.engine.applySettings({ enabled: true, defaultOn: true, skipDarkSites: false,
+        darkness: 50, contrast: 50, saturation: 50, sites: {} });
+      window.__lumenReady = true;
+    })();
+  }
+
+  const lum = (c) => { const m = String(c).match(/[\d.]+/g); if (!m) return null;
+    const [r, g, b] = m.map(Number).map(v => v / 255);
+    return (Math.max(r, g, b) + Math.min(r, g, b)) / 2; };
+  window.__bg = (id) => getComputedStyle(document.getElementById(id)).backgroundColor;
+  window.__fg = (id) => getComputedStyle(document.getElementById(id)).color;
+  window.__lum = lum;
+
+  window.toggleSelected = (id) => {
+    document.getElementById(id).classList.toggle('selected');
+  };
+
+  /**
+   * Called by the driver, which supplies what each surface measured while it was
+   * actually in the state. Two things have to hold for every one of them:
+   *
+   *   converted -- a surface in this state is dark, text in it is light: the
+   *                state was run through the curves at all, and
+   *   moved     -- the state does not paint identically to the resting colour,
+   *                i.e. our own correction for the resting state did not freeze
+   *                it solid.
+   */
+  window.judge = (samples) => {
+    const results = [];
+    for (const s of samples) {
+      const restLum = lum(s.rest);
+      const stateLum = lum(s.state);
+      const converted = stateLum !== null &&
+        (s.kind === 'fg' ? stateLum > 0.5 : stateLum < 0.3);
+      const moved = s.rest !== s.state;
+      results.push({ name: s.name, ok: converted && (s.mustMove ? moved : true),
+                     got: `rest ${s.rest} (${restLum.toFixed(2)}) -> ${s.state} (${stateLum.toFixed(2)})` });
+    }
+    const failed = results.filter(r => !r.ok);
+    return { total: results.length, passed: results.length - failed.length,
+             failed: failed.length, failures: failed };
+  };
+</script>
+</body>
+</html>

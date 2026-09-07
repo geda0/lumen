@@ -215,6 +215,85 @@ Lumen.color = (function () {
   }
 
   /**
+   * Saturation to use after a colour has been moved to a new lightness.
+   *
+   * HSL saturation is a *ratio*, not an amount: the chroma a colour actually
+   * carries is `s x (1 - |2l - 1|)`, which collapses to zero at both ends of
+   * the lightness scale. So carrying `s` across a large lightness move silently
+   * multiplies the colour's real chroma. `#f6f8fa` -- the blue-grey a great many
+   * sites use for `pre`, cards and table stripes -- is `s = 0.29` at `l = 0.97`,
+   * which is a chroma of 0.016: white with a hint of cool in it. Dropped to
+   * `l = 0.08` at the same `s` it comes out at a chroma of 0.046, three times the
+   * tint it started with, and now at a lightness where the eye reads hue easily.
+   * Do that to every surface, border and shadow on a page and the result is the
+   * uniform navy wash that dark modes are notorious for.
+   *
+   * So we hold the *chroma* instead, and never let it grow. Saturated colours are
+   * unaffected -- a brand blue keeps every bit of its saturation, because moving
+   * it toward mid-lightness only gives it more room -- while near-neutral greys
+   * stay near-neutral, which is what they were.
+   */
+  function chromaSafe(s, l, nl) {
+    var capNew = 1 - Math.abs(2 * nl - 1);
+    if (capNew <= 0) return 0;
+    var capOld = 1 - Math.abs(2 * l - 1);
+    return capOld < capNew ? s * (capOld / capNew) : s;
+  }
+
+  // --- tint ----------------------------------------------------------------
+  //
+  // A dark mode does not have to be grey. The curves above land every neutral
+  // surface on a neutral dark, and a tint pulls those toward a hue the user
+  // picked -- warm grey, slate, ink blue -- per role, so surfaces, text and
+  // borders can each carry their own.
+
+  // Chroma at which a colour counts as having a colour of its own. Below this
+  // the tint takes over completely; above it, nothing happens.
+  var TINT_NEUTRAL = 0.15;
+
+  /**
+   * Add the tint to a colour, as a chroma *vector*.
+   *
+   * A colour carrying no chroma of its own ends up exactly on the tint hue. One
+   * carrying plenty -- a brand blue, a red error state, a green diff line -- is
+   * left alone, because a dark mode that rotates brand colours to match a theme
+   * is not tinting, it is repainting. Everything in between moves by how much
+   * room it has, and vector addition gets that gradient for free without any
+   * special casing of hue wraparound.
+   *
+   * Returns null when the colour is too colourful to tint.
+   */
+  function tintChroma(h, c, tint) {
+    var n = 1 - Math.min(1, c / TINT_NEUTRAL);
+    if (n <= 0) return null;
+    var rad = Math.PI / 180;
+    var add = tint.amount * n;
+    var x = c * Math.cos(h * rad) + add * Math.cos(tint.h * rad);
+    var y = c * Math.sin(h * rad) + add * Math.sin(tint.h * rad);
+    return { h: Math.atan2(y, x) / rad, c: Math.sqrt(x * x + y * y) };
+  }
+
+  /**
+   * A neutral at lightness `l`, carrying whatever tint `role` asks for. This is
+   * how the colours we invent rather than convert -- the page background, the
+   * field surface, the selection highlight -- pick up the same tint as the ones
+   * that came from the page.
+   */
+  function shade(l, role, cfg) {
+    var tint = cfg && cfg.tint && cfg.tint[role];
+    var cap = 1 - Math.abs(2 * l - 1);
+    var h = 0;
+    var s = 0;
+    if (tint && tint.amount > 0 && cap > 0) {
+      h = tint.h;
+      s = clamp(tint.amount / cap, 0, 1);
+    }
+    var out = hslToRgb(h, s, l);
+    out.a = 1;
+    return out;
+  }
+
+  /**
    * Convert one color for a given role.
    *   'fg'     text, icons, SVG fill/stroke
    *   'bg'     backgrounds, gradients, shadows
@@ -242,8 +321,28 @@ Lumen.color = (function () {
       if (rgb.a < 0.5 && l >= 0.5) nl = Math.max(nl, cfg.bgMax + 0.05);
     }
 
-    var ns = clamp(hsl.s * cfg.sat, 0, 1);
-    var out = hslToRgb(hsl.h, ns, clamp(nl, 0, 1));
+    nl = clamp(nl, 0, 1);
+    var ns = clamp(chromaSafe(hsl.s, l, nl) * cfg.sat, 0, 1);
+    var hue = hsl.h;
+
+    // Only ever tint a colour the curve actually moved. A colour it left where
+    // it was is one of the already-dark regions this extension exists to
+    // preserve -- tinting those would repaint the code block the whole design
+    // is built around keeping, and would emit an override for every dark colour
+    // on the page to do it.
+    var tint = Math.abs(nl - l) > 1e-6 && cfg.tint
+      ? cfg.tint[kind === 'var' ? (l >= 0.5 ? 'bg' : 'fg') : kind]
+      : null;
+    if (tint && tint.amount > 0) {
+      var cap = 1 - Math.abs(2 * nl - 1);
+      var mixed = cap > 0 ? tintChroma(hue, ns * cap, tint) : null;
+      if (mixed) {
+        hue = mixed.h;
+        ns = clamp(mixed.c / cap, 0, 1);
+      }
+    }
+
+    var out = hslToRgb(hue, ns, nl);
     out.a = rgb.a;
     return out;
   }
@@ -254,6 +353,8 @@ Lumen.color = (function () {
     rgbToHsl: rgbToHsl,
     hslToRgb: hslToRgb,
     modify: modify,
+    chromaSafe: chromaSafe,
+    shade: shade,
     bgCurve: bgCurve,
     fgCurve: fgCurve,
     clamp: clamp

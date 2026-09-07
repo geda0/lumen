@@ -19,6 +19,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   // rather than taking the whole engine down with it.
   var REPAIR = Lumen.repair || {
     scan: function () { return ''; },
+    probe: function () { return null; },
     verify: function () { return 0; },
     pending: function () { return false; },
     abort: function () {},
@@ -33,8 +34,19 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     darkness: 50,
     contrast: 50,
     saturation: 50,
+    // Tint hues in degrees, or null for a neutral grey. One per role, so
+    // surfaces, text and borders can each carry their own.
+    tintSurface: null,
+    tintText: null,
+    tintBorder: null,
+    tintStrength: 45,
     sites: {}
   };
+
+  // Chroma a tint adds at full strength. Text gets a fraction of it: the same
+  // chroma that reads as a warm surface reads as a colour cast on a paragraph.
+  var TINT_MAX = 0.09;
+  var TINT_SCALE = { bg: 1, fg: 0.45, border: 0.8 };
 
   var host = location.hostname || 'local';
   var settings = null;
@@ -65,6 +77,11 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   var repairQueue = [];
   var repairScheduled = false;
 
+  var restyleSet = new Set();
+  var restyleTimer = 0;
+  var stateHandlers = null;
+  var repairSettled = false;
+
   // Stylesheets mutated through insertRule() (styled-components, emotion, and
   // most CSS-in-JS runtimes) produce no DOM mutation at all, so the observer
   // never fires. Poll the rule counts instead, backing off once they settle.
@@ -74,10 +91,22 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
 
   // --- configuration -------------------------------------------------------
 
+  function tintOf(hue, strength, role) {
+    if (hue === null || hue === undefined || hue === '' || !strength) return null;
+    var h = Number(hue);
+    if (isNaN(h)) return null;
+    return { h: h, amount: TINT_MAX * TINT_SCALE[role] * (strength / 100) };
+  }
+
   function derive(s) {
     var bgMin = 0.14 - (s.darkness / 100) * 0.12;
     var bgMax = bgMin + 0.22;
     return {
+      tint: {
+        bg: tintOf(s.tintSurface, s.tintStrength, 'bg'),
+        fg: tintOf(s.tintText, s.tintStrength, 'fg'),
+        border: tintOf(s.tintBorder, s.tintStrength, 'border')
+      },
       bgMin: bgMin,
       bgMax: bgMax,
       // Borders sit a fixed distance above the background floor, so they stay
@@ -96,13 +125,23 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     return explicit === undefined ? s.defaultOn : explicit;
   }
 
+  /**
+   * The colours we invent rather than convert. Each is a neutral at a chosen
+   * lightness, run through the same tint as the colours that came from the page
+   * -- otherwise a tinted site would sit on an untinted background.
+   */
   function baseColors() {
     return {
-      bg: C.toCss(C.hslToRgb(0, 0, cfg.bgMin)),
-      fg: C.toCss(C.hslToRgb(0, 0, cfg.fgMax)),
+      bg: C.toCss(C.shade(cfg.bgMin, 'bg', cfg)),
+      fg: C.toCss(C.shade(cfg.fgMax, 'fg', cfg)),
       // A field surface, lifted off the page so inputs stay distinguishable --
       // the same separation Chrome gives a control under `color-scheme: dark`.
-      field: C.toCss(C.hslToRgb(0, 0, C.clamp(cfg.bgMin + 0.09, 0, 1)))
+      field: C.toCss(C.shade(C.clamp(cfg.bgMin + 0.09, 0, 1), 'bg', cfg)),
+      // Selection. Chrome's own dark-mode highlight is a saturated blue, which
+      // on a page whose surfaces we have deliberately kept near-neutral is the
+      // loudest thing on screen. A grey one reads as a highlight without
+      // recolouring the text under it.
+      selection: C.toCss(C.shade(C.clamp(cfg.bgMin + 0.26, 0, 1), 'bg', cfg))
     };
   }
 
@@ -159,10 +198,15 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   function applyEarly() {
     if (earlyEl) return;
     earlyEl = makeStyle('lumen-early');
+    // Neutral grey on purpose: this is the colour the page wears before any of
+    // its own CSS has loaded, and a tinted one reads as a colour cast over
+    // everything that follows. #141414 is exactly where the background curve
+    // puts white at the default darkness, so nothing shifts when the real sheet
+    // takes over.
     earlyEl.textContent =
       ':root{color-scheme:dark !important;}' +
-      'html{background-color:#111315 !important;}' +
-      'html,body{background-color:#111315 !important;color:#e8e6e3 !important;}';
+      'html{background-color:#141414 !important;}' +
+      'html,body{background-color:#141414 !important;color:#e8e8e8 !important;}';
     attach(earlyEl);
   }
 
@@ -468,6 +512,10 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     out.css =
       ':root{color-scheme:dark !important;}' +
       'html{background-color:' + base.bg + ' !important;color:' + base.fg + ' !important;}' +
+      // No `!important`, on purpose: a page that styles its own selection has
+      // had that rule converted like any other, and the converted one -- which
+      // *is* important -- has to win over this default.
+      '::selection{background-color:' + base.selection + ';color:' + base.fg + ';}' +
       autofillCss(base);
 
     var sheets = document.styleSheets;
@@ -529,6 +577,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     if (!repairEl) repairEl = makeStyle('lumen-repair');
     repairEl.textContent = css;
     attach(repairEl);
+    repairSettled = true;
     if (REPAIR.verify() > 0 && observer) observer.takeRecords();
 
     // Roots queued while that scan was in flight were held back; nothing else
@@ -590,6 +639,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
       scheduleRepairSlice();
       return;
     }
+    repairSettled = true;
 
     // Read back what the sheet actually achieved. Where an author rule outranks
     // it, verify() escalates to an inline !important. Those writes are ours, so
@@ -602,6 +652,133 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     if (repairQueue.length && !repairScheduled) scheduleRepairSlice();
   }
 
+  // --- interaction states --------------------------------------------------
+  //
+  // A repair rule is `!important` and deliberately specific, which means it also
+  // wins against the page's own `:hover`, `:focus` and `.selected` rules -- so an
+  // element we corrected at rest stopped responding to the pointer altogether.
+  // And where the CSS behind a state was unreadable in the first place, the
+  // state was never converted at all and paints light the moment it applies.
+  //
+  // Both are handled by measuring the state while the element is actually in it.
+
+  /**
+   * Run `read` with our repair sheet switched off, so what it measures is the
+   * page's own colour rather than the correction we already made. Everything
+   * happens inside one task and the browser paints only when a task ends, so the
+   * unmasked state is never on screen.
+   */
+  function unmask(read) {
+    var sheet = repairEl && repairEl.sheet;
+    if (!sheet) return read();
+    sheet.disabled = true;
+    try {
+      return read();
+    } finally {
+      sheet.disabled = false;
+    }
+  }
+
+  function applyProbe(target, state) {
+    if (!active || !cfg || !REPAIR.probe) return;
+    // Only ever an adjustment on top of the resting pass. Probing before that
+    // pass has been over the document would file its ordinary corrections under
+    // whatever state happened to be active -- the pointer sits somewhere from
+    // the first frame, so `body` is in `:hover` before the page has even
+    // finished loading -- and the resting page would then be left uncorrected.
+    if (!repairSettled || REPAIR.pending()) return;
+    var css = REPAIR.probe(target, state, cfg, unmask);
+    if (typeof css !== 'string') return;   // nothing moved
+    if (!repairEl) repairEl = makeStyle('lumen-repair');
+    if (repairEl.textContent !== css) repairEl.textContent = css;
+    attach(repairEl);
+  }
+
+  function onHover(e) {
+    var el = e.target;
+    if (el && el.nodeType === 1) applyProbe(el, ':hover');
+  }
+
+  function onFocus(e) {
+    var el = e.target;
+    if (!el || el.nodeType !== 1) return;
+    // `:focus-visible` where the browser is showing a focus ring, so a rule for
+    // keyboard focus is not applied to a mouse click as well.
+    var state = ':focus';
+    try {
+      if (el.matches(':focus-visible')) state = ':focus-visible';
+    } catch (err) { /* older engine: plain :focus */ }
+    applyProbe(el, state);
+  }
+
+  function onPress(e) {
+    var el = e.target;
+    if (!el || el.nodeType !== 1) return;
+    // `:active` belongs to the same gesture but is not guaranteed to be applied
+    // before this listener runs, so measure on the next frame; probe() checks
+    // the element is still in the state before reading anything.
+    requestAnimationFrame(function () { applyProbe(el, ':active'); });
+  }
+
+  /**
+   * A class or ARIA attribute changed -- `.selected` on a row, `aria-current` on
+   * a tab -- so the element's resting colours are not what we measured. Unlike
+   * new content this needs the unmasked path: our own rule is sitting on top of
+   * whatever the page just changed.
+   *
+   * Batched and rate-limited, because a busy page rewrites class attributes
+   * constantly and each probe costs a style recalculation.
+   */
+  function queueRestyle(els) {
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.nodeType !== 1 || isOurs(el) || !el.isConnected) continue;
+      if (restyleSet.size >= 300) break;
+      restyleSet.add(el);
+    }
+    if (restyleTimer || !restyleSet.size) return;
+    restyleTimer = setTimeout(runRestyle, 120);
+  }
+
+  function runRestyle() {
+    restyleTimer = 0;
+    if (!active) { restyleSet.clear(); return; }
+    var batch = [];
+    restyleSet.forEach(function (el) {
+      if (batch.length < 20) { batch.push(el); restyleSet.delete(el); }
+    });
+    if (batch.length) applyProbe(batch, '');
+    if (restyleSet.size) restyleTimer = setTimeout(runRestyle, 120);
+  }
+
+  // Attributes that routinely mean "this element now looks different": a
+  // selected row, a current tab, an open disclosure, a disabled control.
+  var STATE_ATTRS = ['class', 'aria-selected', 'aria-current', 'aria-checked',
+                     'aria-expanded', 'aria-pressed', 'checked', 'selected',
+                     'open', 'disabled'];
+
+  function watchStates() {
+    if (stateHandlers) return;
+    stateHandlers = [
+      ['mouseover', onHover],
+      ['focusin', onFocus],
+      ['pointerdown', onPress]
+    ];
+    for (var i = 0; i < stateHandlers.length; i++) {
+      document.addEventListener(stateHandlers[i][0], stateHandlers[i][1], true);
+    }
+  }
+
+  function unwatchStates() {
+    if (!stateHandlers) return;
+    for (var i = 0; i < stateHandlers.length; i++) {
+      document.removeEventListener(stateHandlers[i][0], stateHandlers[i][1], true);
+    }
+    stateHandlers = null;
+    if (restyleTimer) { clearTimeout(restyleTimer); restyleTimer = 0; }
+    restyleSet.clear();
+  }
+
   // --- CSS-in-JS polling ---------------------------------------------------
 
   function signature() {
@@ -612,6 +789,18 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
       if (sheet.ownerNode && isOurs(sheet.ownerNode)) continue;
       try {
         sig += (sheet.cssRules ? sheet.cssRules.length : 0) + ',';
+      } catch (e) {
+        sig += 'x,';
+      }
+    }
+    // Constructed sheets are not in document.styleSheets, have no owner node to
+    // mutate and fire no load event -- so leaving them out of the signature left
+    // the poll unable to notice the one thing it exists for.
+    var adopted = document.adoptedStyleSheets || [];
+    sig += '|' + adopted.length + ':';
+    for (var j = 0; j < adopted.length; j++) {
+      try {
+        sig += (adopted[j].cssRules ? adopted[j].cssRules.length : 0) + ',';
       } catch (e) {
         sig += 'x,';
       }
@@ -688,12 +877,19 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
       var needs = false;
       var sheets = false;
       var added = null;
+      var restyled = null;
       for (var i = 0; i < records.length; i++) {
         var r = records[i];
         if (r.type === 'attributes') {
-          if (!isOurs(r.target)) {
+          if (isOurs(r.target)) continue;
+          if (r.attributeName === 'style') {
+            // An inline style has to be re-serialised into the inline sheet.
             needs = true;
             (added || (added = [])).push(r.target);
+          } else {
+            // A state attribute changes no CSS, only which of the page's rules
+            // apply -- so re-measure that element rather than rebuild the page.
+            (restyled || (restyled = [])).push(r.target);
           }
           continue;
         }
@@ -726,15 +922,26 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
       if (added) {
         // New content still needs checking even when no stylesheet changed:
         // it may be rendered by rules that were already missed once.
-        for (var k = 0; k < added.length && k < 40; k++) queueRepair(added[k]);
+        //
+        // Past a certain batch size, queueing each root individually is both
+        // slower than one document pass and -- when the batch is bigger than the
+        // cap -- wrong: the nodes past it were dropped on the floor and stayed
+        // white for good. One fragment of 60 rows arrives as a single record, so
+        // that is not a rare shape.
+        if (added.length > 40) {
+          queueRepair(document.documentElement);
+        } else {
+          for (var k = 0; k < added.length; k++) queueRepair(added[k]);
+        }
         armPoll();
       }
+      if (restyled) queueRestyle(restyled);
     });
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['style']
+      attributeFilter: ['style'].concat(STATE_ATTRS)
     });
 
     // Polling pauses while hidden; pick it back up on return, since anything
@@ -778,12 +985,15 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     active = true;
     applyEarly();
     watch();
+    watchStates();
     rebuild();
     armPoll();
   }
 
   function disable() {
     active = false;
+    repairSettled = false;
+    unwatchStates();
     if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = 0; }
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = 0; }
     lastSignature = '';
@@ -825,7 +1035,9 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   function load(stored) {
     settings = Object.assign({}, DEFAULTS, stored || {});
     settings.sites = settings.sites || {};
-    var key = settings.darkness + '|' + settings.contrast + '|' + settings.saturation;
+    var key = [settings.darkness, settings.contrast, settings.saturation,
+               settings.tintSurface, settings.tintText, settings.tintBorder,
+               settings.tintStrength].join('|');
     var moved = key !== cfgKey;
     cfgKey = key;
     cfg = derive(settings);

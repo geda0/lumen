@@ -38,6 +38,42 @@
     </div>
   </div>
 
+  <div class="tints" id="tints">
+    <div class="tints-head">
+      <span>Tint</span>
+      <span class="hint">greys only — brand colours keep their hue</span>
+    </div>
+
+    <div class="tint-row">
+      <button class="swatch" id="tintSurface-swatch" aria-pressed="false"
+              aria-label="Tint surfaces"></button>
+      <label for="tintSurface">Surfaces</label>
+      <input type="range" class="hue" id="tintSurface" min="0" max="359" step="1"
+             aria-label="Surface tint hue">
+    </div>
+
+    <div class="tint-row">
+      <button class="swatch" id="tintText-swatch" aria-pressed="false"
+              aria-label="Tint text"></button>
+      <label for="tintText">Text</label>
+      <input type="range" class="hue" id="tintText" min="0" max="359" step="1"
+             aria-label="Text tint hue">
+    </div>
+
+    <div class="tint-row">
+      <button class="swatch" id="tintBorder-swatch" aria-pressed="false"
+              aria-label="Tint borders"></button>
+      <label for="tintBorder">Borders</label>
+      <input type="range" class="hue" id="tintBorder" min="0" max="359" step="1"
+             aria-label="Border tint hue">
+    </div>
+
+    <div class="slider">
+      <label for="tintStrength">Tint strength <output id="tintStrength-out"></output></label>
+      <input type="range" id="tintStrength" min="0" max="100" step="5">
+    </div>
+  </div>
+
   <div class="preview" id="preview">
     <div class="preview-page">
       <div class="preview-title"></div>
@@ -66,6 +102,7 @@
     <button id="master" class="link danger">Turn off everywhere</button>
   </footer>
 
+  <script src="../content/color.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
