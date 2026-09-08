@@ -52,6 +52,15 @@ Lumen.repair = (function () {
   var MIN_PER_SLICE = 2000;
 
   var SELF_TEXT = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'OPTION', 'SUMMARY']);
+
+  // Surfaces the user types into. The browser keeps state of its own on these
+  // -- a spelling underline, a composition, a selection -- and rebuilds it when
+  // the element changes, so we take care not to touch them. See unmasked().
+  var TYPED_IN = new Set(['INPUT', 'TEXTAREA']);
+
+  function isEditing(el) {
+    return TYPED_IN.has(el.tagName) || el.isContentEditable === true;
+  }
   var SKIP = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'TITLE', 'BR', 'NOSCRIPT']);
 
   // How much of a hovered element's subtree is looked at. A rule like
@@ -746,11 +755,27 @@ Lumen.repair = (function () {
    * seventy elements. Removing an attribute invalidates only the element that
    * carried it. Every ancestor a measurement depends on is in the list, so the
    * elements unmasked are exactly the ones being judged.
+   *
+   * Strictly the reads, and never the writes that follow them: this restores
+   * the markers it took off, so re-marking an element while the window is open
+   * has the restore put the old marker straight back alongside the new one. An
+   * element then carries two corrections at once and paints whichever rule
+   * happens to sit later in the sheet -- and collects another one every time
+   * the page restyles it.
+   *
+   * Not for a field the user types into. Chromium hangs its own state off those
+   * -- the spelling underline above all -- and rebuilds it when the element is
+   * touched, so taking an attribute off an <input> and putting it back is
+   * enough to lose the red underline just as someone starts typing. Those go
+   * through `sheets`, which switches our stylesheets off instead and leaves the
+   * element alone. It costs a full style recalculation, but it happens when a
+   * field is focused or hovered, not while the pointer is moving.
    */
-  function unmasked(list, read) {
+  function unmasked(list, read, sheets) {
     var stripped = [];
     for (var i = 0; i < list.length; i++) {
       var el = list[i].el;
+      if (sheets && isEditing(el)) return sheets(read);
       var gid = groupOf.get(el);
       if (gid !== undefined) stripped.push(el, ATTR_GROUP + gid);
       var uid = ids.get(el);
@@ -765,15 +790,21 @@ Lumen.repair = (function () {
     }
   }
 
-  function measureProbe(list, state, cfg) {
+  /**
+   * The reading half of a probe: what every element in the list wants, with
+   * nothing written down yet.
+   *
+   * idFor() and group() set attributes, which invalidate style and would make
+   * the next getComputedStyle in this loop recalculate the whole document --
+   * the same trap commit() exists to avoid -- so the writes wait for
+   * commitProbe().
+   */
+  function readProbe(list, state, cfg) {
     var pageBg = C.hslToRgb(0, 0, cfg.bgMin);
     pageBg.a = 1;
     var memo = new Map();
     var found = [];
 
-    // Read everything first. idFor() sets an attribute, which invalidates style
-    // and would make the next getComputedStyle in this loop recalculate the
-    // whole document -- the same trap commit() exists to avoid.
     for (var i = 0; i < list.length; i++) {
       var el = list[i].el;
       if (!el.isConnected) continue;
@@ -788,6 +819,11 @@ Lumen.repair = (function () {
       });
     }
 
+    return found;
+  }
+
+  /** The writing half: fold what readProbe() found into the rules. */
+  function commitProbe(found, state) {
     var changed = false;
     for (var j = 0; j < found.length; j++) {
       var hit = found[j];
@@ -872,9 +908,11 @@ Lumen.repair = (function () {
    *
    * The measurement runs unmasked -- see unmasked() -- so a state is judged by
    * the page's own colour for it rather than by the correction we already made
-   * for the resting one.
+   * for the resting one. `unmask(read)` must run `read` with our repair sheets
+   * disabled; it is the unmasking of last resort, for elements that must not be
+   * touched at all.
    */
-  function probe(target, state, cfg) {
+  function probe(target, state, cfg, unmask) {
     if (!cfg) return false;
     // One entry per element per state, so this only grows with how much of the
     // page has actually been interacted with. Start over rather than let a very
@@ -894,9 +932,10 @@ Lumen.repair = (function () {
     }
     if (!list.length) return false;
 
-    return unmasked(list, function () {
-      return measureProbe(list, state, cfg);
-    }) || false;
+    var found = unmasked(list, function () {
+      return readProbe(list, state, cfg);
+    }, unmask);
+    return commitProbe(found, state);
   }
 
   /**

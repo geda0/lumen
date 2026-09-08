@@ -791,6 +791,27 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
   //
   // Both are handled by measuring the state while the element is actually in it.
 
+  /**
+   * Unmasking of last resort: run `read` with our repair sheets switched off.
+   *
+   * Disabling a sheet invalidates style for the whole document, so this is only
+   * for what the repair pass will not touch attribute-by-attribute -- a field
+   * the user types into. Everything happens inside one task and the browser
+   * paints only when a task ends, so the unmasked state is never on screen.
+   */
+  function unmask(read) {
+    var sheets = [];
+    if (repairEl && repairEl.sheet) sheets.push(repairEl.sheet);
+    if (repairStateEl && repairStateEl.sheet) sheets.push(repairStateEl.sheet);
+    if (!sheets.length) return read();
+    for (var i = 0; i < sheets.length; i++) sheets[i].disabled = true;
+    try {
+      return read();
+    } finally {
+      for (var j = 0; j < sheets.length; j++) sheets[j].disabled = false;
+    }
+  }
+
   function applyProbe(target, state) {
     if (!active || !cfg || !REPAIR.probe) return;
     // Only ever an adjustment on top of the resting pass. Probing before that
@@ -799,7 +820,7 @@ var Lumen = (typeof Lumen === 'object' && Lumen) || {};
     // the first frame, so `body` is in `:hover` before the page has even
     // finished loading -- and the resting page would then be left uncorrected.
     if (!repairSettled || REPAIR.pending()) return;
-    if (!REPAIR.probe(target, state, cfg)) return;   // nothing moved
+    if (!REPAIR.probe(target, state, cfg, unmask)) return;   // nothing moved
     applyRepairSheets();
   }
 
