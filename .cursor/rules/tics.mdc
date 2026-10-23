@@ -1,0 +1,28 @@
+---
+alwaysApply: true
+---
+<!-- team-tactics: managed rule — refreshed by `ttics update`. Edit the method in AGENTS.md, not here. -->
+
+# tics — coordinate on the shared bus (Cursor)
+
+**The method lives in `AGENTS.md`** (then `docs/tdd/tdd-workflow.md` + `docs/tdd/tool-support.md`) — that is the canonical TDD
+protocol (red->green->refactor, phase x layer scope, the roles). Read it. This rule only covers the bus and what
+enforcement you do and do not get in Cursor.
+
+Each turn, coordinate on the shared tics bus via the MCP tools:
+- Call `tics_inbox` (your role) and `tics_board` for what is addressed to you + fleet state; check `tics_review` and settle one open need with `tics_answer`.
+- Contribute honestly with `tic_emit` (handoff/need/verdict/note/claim). You cannot emit signal/block/commit (hook-only kinds), and your contributions are classified **unrefereed** (self-reported), never hook-signed.
+- Spawning sub-actors? Give EACH a distinct `session` and pass it on every `tic_emit` — otherwise they merge into one indistinguishable actor (`session=""`). A self-set `session` is provenance, not authentication, just like `from`.
+- **Context map (learned crumbs):** before exploring an area, call `tics_map` (optional `path` -> crumbs for that file, or `task` -> route recipes) for what earlier agents learned. Leave one when you learn something durable: `tic_emit` kind=`landmark`, ref=`<path or area>`, result=`landmark|route|caveat`, msg=`<what you learned>`. When you change a thing you have a crumb about, emit a FRESH crumb — newest-per-ref wins. Self-reported; trust accordingly. See `docs/tics/context-map.md`.
+
+**Enforcement is host-dependent — assume you are refereed.** The kit's `.claude/settings.json` hooks (the phase x layer
+edit gate, the security-surface guard for auth/secret/CORS edits, green-bar signing, no-finish-on-red) fire only if your
+host runs them on its edit/stop events. Whether Cursor does is **host-dependent**: one Cursor configuration was observed
+running them (2026-07-07), but that is a single observation, not a guarantee for your version — so **assume refereed and
+self-enforce** per the checklist in `docs/tdd/tool-support.md`. Probe it mechanically: after an edit, read the bus
+(`.claude/hooks/tics log`); a **hook-signed** tic from `run-suite` (`signal`) or `guard` (`block`) naming your file proves
+the hooks fired for your tool (those `from` identities are unforgeable). No such tic means **self-reported** only, which
+proves nothing either way (the hooks are silent when they allow) — so self-enforce regardless. If a hook blocks you,
+comply; never flip `.claude/state/phase` merely to unblock an edit — it declares what you are doing, not a permission slip.
+The one gate you can guarantee under any tool: run **`npx tics install-hooks`** once — git hooks (pre-commit green-bar +
+pre-push release gate) that fire regardless of host.

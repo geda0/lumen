@@ -1,0 +1,9 @@
+#!/bin/sh
+# team-tactics tic reader — POSIX wrapper. Stays an extensionless command but execs the
+# .cjs reader, so it's CommonJS even inside a "type":"module" repo. Do not edit (refreshed).
+d=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$d/../.." && pwd)
+# Honor a shared bus (TICS_DIR / TICS_FILE) set in tdd.config — e.g. worktree sections share one spool.
+[ -f "$ROOT/.claude/tdd.config" ] && . "$ROOT/.claude/tdd.config"
+export TICS_DIR TICS_FILE
+exec node "$d/tics-view.cjs" "$@"

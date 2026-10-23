@@ -1,0 +1,16 @@
+# >>> team-tactics (managed) >>>
+# Transient kit artifacts - never commit (other state files ARE committed for continuity).
+.claude/state/suite-status
+.claude/state/telemetry.jsonl
+.claude/state/tics.jsonl
+.claude/state/tics.d/
+.claude/**/*.bak
+.claude/agents/*.md.kit-*
+*.team-tactics.*
+# MCP server configs hold machine-specific absolute paths — never commit (re-generate via mcp-install).
+.mcp.json
+.cursor/mcp.json
+# <<< team-tactics (managed) <<<
+
+# Lumen: playwright-core, installed ad hoc for the browser specs (see tools/pw.js).
+node_modules/
