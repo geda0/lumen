@@ -151,6 +151,12 @@ Lumen.color = (function () {
       return { r: c[0], g: c[1], b: c[2], a: a };
     }
 
+    // A hue may carry an angle unit -- `0.5turn`, `3.14rad`, `200grad`. Reading
+    // one with a bare parseFloat silently took `0.5turn` for half a degree, so
+    // cyan was read as red and then confidently painted. Decline instead: the
+    // canvas below resolves it, and an answer that is merely slower is a great
+    // deal better than one that is wrong.
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)(deg)?$/i.test(parts[0])) return null;
     var h = parseFloat(parts[0]);
     var sat = parseFloat(parts[1]) / 100;
     var lig = parseFloat(parts[2]) / 100;

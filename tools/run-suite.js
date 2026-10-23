@@ -16,7 +16,7 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const UNIT = ['tools/test.js'];
-const BROWSER = ['tools/states-spec.js', 'tools/flicker-spec.js'];
+const BROWSER = ['tools/states-spec.js', 'tools/flicker-spec.js', 'tools/color-spec.js'];
 
 const argv = process.argv.slice(2);
 const only = argv.find((a) => a === '--unit' || a === '--browser');

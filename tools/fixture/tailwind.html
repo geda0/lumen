@@ -55,6 +55,10 @@
   .v4-rel   { background-color: rgb(from #ffffff r g b); padding: 8px; }
   /* Already dark in oklch: it must be left alone, not pushed around. */
   .v4-dark  { background-color: oklch(0.18 0.01 285); padding: 8px; }
+  /* A translucent wash in oklch. Reading a colour back off a canvas gives the
+     wrong alpha unless the fill REPLACES the pixel, and the wrong alpha turns a
+     separator into a surface -- so this is the one that notices. */
+  .v4-wash  { background-color: oklch(1 0 0 / 0.1); height: 10px; }
 </style>
 </head>
 <body>
@@ -77,6 +81,7 @@
   <div class="v4-p3" id="v4-p3">color(display-p3 …)</div>
   <div class="v4-rel" id="v4-rel">a relative colour</div>
   <div class="v4-dark" id="v4-dark">already dark in oklch</div>
+  <div class="v4-wash" id="v4-wash"></div>
 </div>
 
 <script>

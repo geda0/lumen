@@ -24,7 +24,8 @@ const DARK = 0.30;
 const LIGHT = 0.55;
 
 const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand',
-             'v4-card', 'v4-text', 'v4-mix', 'v4-lab', 'v4-p3', 'v4-rel', 'v4-dark'];
+             'v4-card', 'v4-text', 'v4-mix', 'v4-lab', 'v4-p3', 'v4-rel', 'v4-dark',
+             'v4-wash'];
 
 (async () => {
   const browser = await chromium.launch();
@@ -42,6 +43,12 @@ const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand',
       }
       return out;
     }, ids);
+
+    // What the page paints on its own, before the extension has run at all. Some
+    // claims are about a colour NOT moving, and those need a before to compare
+    // against -- a threshold would be satisfied by a colour that was already
+    // there, which proves nothing about what we did.
+    const baseline = await readAll(IDS);
 
     // Switch on and read back inside ONE evaluate: no await between them, so the
     // browser has had no opportunity to run an idle callback. Whatever is dark here
@@ -113,9 +120,22 @@ const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand',
     await check('a display-p3 surface is dark on the FIRST paint', firstPaint['v4-p3'].bg, (l) => l < DARK);
     await check('a relative colour is dark on the FIRST paint', firstPaint['v4-rel'].bg, (l) => l < DARK);
     // Reading a colour is not licence to restyle it: one that is already dark
-    // must come through untouched, in oklch as in any other notation.
-    await check('an already-dark oklch surface is left where it was',
-      settled['v4-dark'].bg, (l) => l < 0.18);
+    // must come through UNTOUCHED, in oklch as in any other notation. A
+    // threshold cannot say that -- it was dark before the extension ran, so
+    // `l < 0.18` passed even when the colour was unreadable. Equality against
+    // what the page painted before we touched it can.
+    results.push({
+      name: 'an already-dark oklch surface is byte-for-byte untouched',
+      ok: firstPaint['v4-dark'].bg === baseline['v4-dark'].bg,
+      got: baseline['v4-dark'].bg + ' -> ' + firstPaint['v4-dark'].bg,
+    });
+
+    // A translucent wash read back off a canvas only keeps its alpha if the fill
+    // replaces the pixel rather than blending onto it. Get that wrong and the
+    // alpha reads as opaque, the wash is treated as a surface, and a 10% white
+    // divider is converted to near-black and disappears.
+    await check('a translucent oklch wash stays a visible separator',
+      firstPaint['v4-wash'].bg, (l) => l > DARK && l < LIGHT);
 
     // --- without flattening the page's own colour ---------------------------
     const brand = (settled.brand.fg.match(/[\d.]+/g) || []).map(Number);

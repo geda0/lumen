@@ -10,20 +10,45 @@ const NAMED = {
   whitesmoke: '#f5f5f5', gainsboro: '#dcdcdc', navy: '#000080'
 };
 
+/*
+ * A stand-in for the canvas 2D context.
+ *
+ * `accepts` widens what the fake recognises -- a real engine knows oklch() and
+ * the rest, and the colour parser's slow path leans on that. `pixel` is what
+ * getImageData hands back, or an Error to throw: the readback path has contract
+ * corners (a non-colour must stay null even when the readback works, a refused
+ * readback must degrade to null) that are about OUR ordering, not the engine's
+ * colour maths, so they belong here rather than in a browser.
+ */
 class FakeCtx {
-  constructor() { this._fill = '#000000'; }
+  constructor(opts) {
+    this._fill = '#000000';
+    this._opts = opts || {};
+    this.globalCompositeOperation = 'source-over';
+  }
   set fillStyle(v) {
     const s = String(v).trim().toLowerCase();
     if (NAMED[s]) { this._fill = NAMED[s]; return; }
     if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(s)) { this._fill = s; return; }
     if (/^rgba?\(/.test(s) || /^hsla?\(/.test(s)) { this._fill = s; return; }
+    if (this._opts.accepts && this._opts.accepts.test(s)) { this._fill = s; return; }
     /* invalid: ignored, sentinel survives */
   }
   get fillStyle() { return this._fill; }
+  fillRect() {}
+  getImageData() {
+    if (!this._opts.pixel) throw new Error('getImageData unavailable');
+    if (this._opts.pixel instanceof Error) throw this._opts.pixel;
+    return { data: this._opts.pixel };
+  }
 }
 
+// Swapped per test by reloading color.js in a context whose canvas behaves
+// differently; the default keeps every other test on the pre-readback path.
+let canvasOpts = {};
+
 const ctx = {
-  OffscreenCanvas: class { getContext() { return new FakeCtx(); } },
+  OffscreenCanvas: class { getContext() { return new FakeCtx(canvasOpts); } },
   console
 };
 vm.createContext(ctx);
@@ -31,6 +56,22 @@ for (const f of ['src/content/color.js', 'src/content/css.js', 'src/content/repa
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'), ctx, { filename: f });
 }
 const { color: C, css: CSS, repair: R } = ctx.Lumen;
+
+/*
+ * A fresh colour module whose canvas behaves as described. Needed because
+ * color.js makes its context once and parse() memoises, so neither would notice
+ * a canvas swapped in after load.
+ */
+function colorWith(opts) {
+  const box = {
+    OffscreenCanvas: class { getContext() { return new FakeCtx(opts); } },
+    console,
+  };
+  vm.createContext(box);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/content/color.js'), 'utf8'),
+    box, { filename: 'color.js' });
+  return box.Lumen.color;
+}
 
 const cfg = {
   bgMin: 0.08, bgMax: 0.30, borderMin: 0.24, borderMax: 0.48,
@@ -470,6 +511,61 @@ check('a block with no unexpanded shorthand emits only its longhands', (() => {
   const out = CSS.declarations(s, cfg, false);
   return /background-color:/.test(out) && !/(^|;)\s*background:/.test(out);
 })(), CSS.declarations(fakeStyle({ 'background-color': 'rgb(255 255 255 / var(--o, 1))' }), cfg, false));
+
+group('color: reading a colour back off the canvas');
+// The readback resolves anything the engine understands -- oklch(), lab(),
+// color-mix() -- by painting it and reading the pixel. What it must NOT do is
+// resolve something that is not a colour: `solid`, `inset` and `to right` live
+// inside shadows and gradients, and turning one into a colour would corrupt the
+// value it sits in. That ordering is ours, not the engine's, so it is pinned
+// here rather than in a browser.
+const OKLCH = /^(oklch|oklab|lab|lch|color|color-mix)\(/;
+
+check('a non-colour stays null even when the readback works', (() => {
+  const c = colorWith({ accepts: OKLCH, pixel: [10, 20, 30, 255] });
+  return ['solid', 'inset', 'to right', 'ease-in-out'].every((s) => c.parse(s) === null);
+})());
+
+check('the readback resolves a colour the notations cannot spell', (() => {
+  const c = colorWith({ accepts: OKLCH, pixel: [10, 20, 30, 255] });
+  const out = c.parse('oklch(0.7 0.15 250)');
+  return out && out.r === 10 && out.g === 20 && out.b === 30 && out.a === 1;
+})(), JSON.stringify(colorWith({ accepts: OKLCH, pixel: [10, 20, 30, 255] })
+  .parse('oklch(0.7 0.15 250)')));
+
+check('the alpha channel is carried through as a fraction', (() => {
+  const c = colorWith({ accepts: OKLCH, pixel: [10, 20, 30, 128] });
+  const out = c.parse('oklch(0.7 0.15 250 / 0.5)');
+  return out && Math.abs(out.a - 128 / 255) < 1e-9;
+})(), JSON.stringify(colorWith({ accepts: OKLCH, pixel: [10, 20, 30, 128] })
+  .parse('oklch(0.7 0.15 250 / 0.5)')));
+
+// An engine that refuses the readback leaves the caller exactly where it was:
+// null, and the repair pass picks the colour up later. Silence, never a guess.
+check('a refused readback degrades to null, not to a guess', (() => {
+  const c = colorWith({ accepts: OKLCH, pixel: new Error('SecurityError') });
+  return c.parse('oklch(0.7 0.15 250)') === null;
+})());
+
+check('with no readback at all the parser is unchanged', (() => {
+  const c = colorWith({ accepts: OKLCH });      // getImageData throws
+  return c.parse('oklch(0.7 0.15 250)') === null && c.parse('#ffffff').r === 255;
+})());
+
+// A hue carrying an angle unit must never be read as bare degrees: `0.5turn` is
+// 180deg, and taking it for half a degree turned cyan into red and painted it.
+check('an hsl hue with an angle unit is declined, not misread', (() => {
+  const c = colorWith({});
+  return ['hsl(0.5turn 50% 50%)', 'hsl(3.14rad 50% 50%)', 'hsl(200grad 50% 50%)']
+    .every((s) => c.parse(s) === null);
+})());
+
+check('a plain or deg hue still takes the fast path', (() => {
+  const c = colorWith({});
+  const a = c.parse('hsl(180 50% 50%)');
+  const b = c.parse('hsl(180deg 50% 50%)');
+  return a && b && a.r === b.r && a.g === b.g && a.b === b.b && Math.round(a.r) === 64;
+})());
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
