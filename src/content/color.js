@@ -73,6 +73,31 @@ Lumen.color = (function () {
     return { r: r, g: g, b: b, a: a };
   }
 
+  /**
+   * Resolve a colour the canvas accepted but did not answer in sRGB, by painting
+   * it and reading the pixel back.
+   *
+   * `copy` rather than the default `source-over`, so the fill REPLACES the pixel
+   * instead of being composited onto it -- otherwise a translucent colour would
+   * come back blended with whatever was there and its alpha would be lost.
+   * ImageData is non-premultiplied, so the channels come back as authored.
+   *
+   * Returns null where the readback is unavailable (an older engine, a context
+   * that refuses getImageData), leaving the caller exactly where it was before.
+   */
+  function pixel(str) {
+    if (!ctx || typeof ctx.getImageData !== 'function') return null;
+    try {
+      ctx.globalCompositeOperation = 'copy';
+      ctx.fillStyle = str;
+      ctx.fillRect(0, 0, 1, 1);
+      var d = ctx.getImageData(0, 0, 1, 1).data;
+      return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+    } catch (e) {
+      return null;
+    }
+  }
+
   /** Parse a CSS color token into {r,g,b,a}, or null if it isn't a color. */
   function parse(str) {
     if (typeof str !== 'string') return null;
@@ -95,6 +120,13 @@ Lumen.color = (function () {
       if (norm) {
         if ((m = HEX.exec(norm))) out = parseHex(m[1]);
         else if ((m = FN.exec(norm))) out = parseFn(m[1].toLowerCase(), m[2]);
+        // The canvas understood it but answered in a space these two notations
+        // cannot read -- `oklch(1 0 0)`, `color(srgb …)`, `lab(…)`. That is the
+        // whole modern palette: Tailwind v4 and shadcn write every colour in
+        // oklch, and a computed value keeps the space it was authored in. Paint
+        // it and read the pixel back, which answers in sRGB whatever the input
+        // notation was, including notations that do not exist yet.
+        else out = pixel(s);
       }
     }
 

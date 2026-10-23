@@ -23,7 +23,8 @@ const URL = 'http://localhost:8123/tools/fixture/tailwind.html?lumen=1';
 const DARK = 0.30;
 const LIGHT = 0.55;
 
-const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand'];
+const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand',
+             'v4-card', 'v4-text', 'v4-mix', 'v4-lab', 'v4-p3', 'v4-rel', 'v4-dark'];
 
 (async () => {
   const browser = await chromium.launch();
@@ -99,6 +100,22 @@ const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand'];
     // is that it is dark by the time the page has settled, not that it was early.
     await check('an unreadable alpha still ends up dark, via the repair pass',
       settled.unknown.bg, (l) => l < DARK);
+
+    // --- any colour the browser understands, not just the ones we can spell --
+    // Tailwind v4 and shadcn write every colour in oklch, and use color-mix()
+    // where v3 used an opacity var. A parser that knows only hex and rgb() reads
+    // none of it, so a whole modern site falls to the repair pass and flashes --
+    // the same bug as the v3 one above, in a different notation.
+    await check('an oklch surface is dark on the FIRST paint', firstPaint['v4-card'].bg, (l) => l < DARK);
+    await check('oklch text is light on the FIRST paint', firstPaint['v4-text'].fg, (l) => l > LIGHT);
+    await check('a color-mix() surface is dark on the FIRST paint', firstPaint['v4-mix'].bg, (l) => l < DARK);
+    await check('a lab() surface is dark on the FIRST paint', firstPaint['v4-lab'].bg, (l) => l < DARK);
+    await check('a display-p3 surface is dark on the FIRST paint', firstPaint['v4-p3'].bg, (l) => l < DARK);
+    await check('a relative colour is dark on the FIRST paint', firstPaint['v4-rel'].bg, (l) => l < DARK);
+    // Reading a colour is not licence to restyle it: one that is already dark
+    // must come through untouched, in oklch as in any other notation.
+    await check('an already-dark oklch surface is left where it was',
+      settled['v4-dark'].bg, (l) => l < 0.18);
 
     // --- without flattening the page's own colour ---------------------------
     const brand = (settled.brand.fg.match(/[\d.]+/g) || []).map(Number);
