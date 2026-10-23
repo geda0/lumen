@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — Tailwind var-alpha fixture</title>
+<style>
+  /* Exactly the shape Tailwind compiles to. Every utility below carries its colour
+     in an rgb() whose alpha is a custom property, which is what a real Tailwind
+     build emits for bg-white, text-gray-900, border-gray-200 and the rest. Nothing
+     here is exotic: it is the default output of the most widely deployed CSS
+     framework there is, so a page like this is the common case, not an edge one. */
+  *, ::before, ::after { --tw-bg-opacity: 1; --tw-text-opacity: 1; --tw-border-opacity: 1; }
+
+  body {
+    background-color: rgb(249 250 251 / var(--tw-bg-opacity, 1));
+    color: rgb(17 24 39 / var(--tw-text-opacity, 1));
+    font: 15px/1.5 system-ui, sans-serif;
+    margin: 0; padding: 24px;
+  }
+  .card {
+    background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1));
+    /* Tailwind writes the width and the colour as separate declarations (`border`
+       plus `border-gray-200`), never as one `border:` shorthand -- and that matters,
+       because `border-color` carrying a var() is a shorthand CSSOM will not expand
+       into the longhands the rule walker reads. */
+    border-width: 1px; border-style: solid;
+    border-color: rgb(229 231 235 / var(--tw-border-opacity, 1));
+    border-radius: 12px; padding: 20px; max-width: 640px;
+  }
+  .title  { color: rgb(26 26 26 / var(--tw-text-opacity, 1)); font-weight: 700; }
+  .muted  { color: rgb(102 102 102 / var(--tw-text-opacity, 1)); }
+  /* The legacy comma syntax, still emitted by older Tailwind builds. */
+  .legacy { background-color: rgba(255, 255, 255, var(--tw-bg-opacity, 1)); padding: 8px; }
+  /* A 10% white wash used as a divider. It must stay visible against the new dark
+     base -- converting it like an opaque surface makes it disappear entirely. */
+  .wash   { background-color: rgb(255 255 255 / var(--divider-alpha, 0.1)); height: 10px; }
+  /* No fallback: the alpha is genuinely unknowable to the rule walker, which must
+     decline and leave this one to the repair pass. The property IS defined, so the
+     element really does paint white -- an undefined var would make the declaration
+     invalid and the element transparent, which would prove nothing. */
+  .opaque-unknown { --mystery: 1; background-color: rgb(255 255 255 / var(--mystery)); padding: 8px; }
+  /* A brand colour the page owns: it must stay blue, not be flattened to grey. */
+  .brand  { color: rgb(0 102 204 / var(--tw-text-opacity, 1)); }
+</style>
+</head>
+<body>
+<h1 class="title" id="title">Welcome, Marwan!</h1>
+<p class="muted" id="muted">Complete the steps below to get started.</p>
+
+<div class="card" id="card">
+  <h2 class="title">Sign Legal Documents</h2>
+  <p class="muted">Complete the required documents below to continue.</p>
+  <div class="legacy" id="legacy">A surface written in the legacy comma syntax.</div>
+  <div class="wash" id="wash"></div>
+  <div class="opaque-unknown" id="unknown">An alpha we cannot read.</div>
+  <p class="brand" id="brand">A link in the brand colour.</p>
+</div>
+
+<script>
+  // Loaded WITHOUT auto-applying: the spec calls __lumenApply() itself so it can
+  // read the page in the very same task, before any idle work has had a chance to
+  // run. That is the whole question here -- what the first paint looks like.
+  if (location.search.includes('lumen')) {
+    window.chrome = { runtime: { sendMessage: (m, cb) => {
+      fetch(m.url).then(r => r.text()).then(t => cb({ ok: true, text: t })).catch(() => cb({ ok: false }));
+    } } };
+    const load = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+    (async () => {
+      for (const f of ['color', 'css', 'repair', 'engine']) await load('/src/content/' + f + '.js');
+      window.__lumenApply = () => Lumen.engine.applySettings({
+        enabled: true, defaultOn: true, skipDarkSites: false,
+        darkness: 50, contrast: 50, saturation: 50, sites: {}
+      });
+      window.__lumenReady = true;
+    })();
+  }
+
+  window.__bg = (id) => getComputedStyle(document.getElementById(id)).backgroundColor;
+  window.__fg = (id) => getComputedStyle(document.getElementById(id)).color;
+  window.__lum = (c) => {
+    const m = String(c).match(/[\d.]+/g);
+    if (!m) return null;
+    const [r, g, b] = m.map(Number).map(v => v / 255);
+    return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
+  };
+</script>
+</body>
+</html>

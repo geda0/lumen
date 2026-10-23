@@ -161,6 +161,88 @@ Lumen.css = (function () {
   }
 
   /**
+   * Split a colour function whose alpha is a `var()`.
+   *
+   * Tailwind writes its entire palette this way -- `rgb(255 255 255 / var(--tw-bg-opacity, 1))`
+   * is `bg-white`, and every text-/border-/bg- utility used without an opacity
+   * modifier has the same shape. The alpha is a variable we cannot resolve, but
+   * the channels in front of it are an ordinary colour, and refusing the whole
+   * declaration over the alpha handed a Tailwind site's every surface to the
+   * repair pass. That pass is asynchronous, so the page painted light first and
+   * corrected itself a few hundred milliseconds later -- the flash.
+   *
+   * The alpha still has to be *known*, even though it is not ours to resolve:
+   * `C.modify` keeps a translucent white wash light enough to go on reading as a
+   * separator, and it can only do that when it is told the alpha. So the var's
+   * own fallback is read when it is a plain number -- which is the common case,
+   * Tailwind writing `var(--tw-bg-opacity, 1)` -- and anything else is refused,
+   * leaving the declaration to the repair pass, which sees the colour the browser
+   * actually resolved. Guessing would be wrong for half the pages either way.
+   *
+   * Returns { rgb, alpha, legacy } or null when there is no colour to read: a
+   * var among the CHANNELS (`rgb(var(--brand) / 0.5)`) is genuinely opaque to us.
+   */
+  function varAlpha(token) {
+    var open = token.indexOf('(');
+    if (open === -1 || token.charAt(token.length - 1) !== ')') return null;
+    var name = token.slice(0, open).toLowerCase();
+    if (name !== 'rgb' && name !== 'rgba' && name !== 'hsl' && name !== 'hsla') return null;
+
+    var inner = token.slice(open + 1, token.length - 1);
+    // The alpha separator, at the top level only: `/` in the modern syntax, the
+    // last of three commas in the legacy one. A comma inside the var's own
+    // fallback (`var(--x, 1)`) is nested, so depth keeps it out of the way.
+    var depth = 0, slash = -1, commas = [];
+    for (var i = 0; i < inner.length; i++) {
+      var ch = inner.charAt(i);
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if (depth === 0 && ch === '/') slash = i;
+      else if (depth === 0 && ch === ',') commas.push(i);
+    }
+    var cut = slash !== -1 ? slash : (commas.length === 3 ? commas[2] : -1);
+    if (cut === -1) return null;
+
+    var alpha = inner.slice(cut + 1).trim();
+    if (alpha.slice(0, 4).toLowerCase() !== 'var(') return null; // a plain alpha parses already
+    var channels = inner.slice(0, cut).trim();
+    if (channels.indexOf('var(') !== -1) return null;      // no colour to read
+
+    var known = fallbackAlpha(alpha);
+    if (known === null) return null;                       // unknowable: leave it to repair
+
+    // Read the channels on their own. hsl() keeps its own name so the parser
+    // reads the numbers in the right space; the result comes back as rgb.
+    var base = (name === 'hsl' || name === 'hsla') ? 'hsl' : 'rgb';
+    var rgb = C.parse(base + '(' + channels + ')');
+    if (!rgb) return null;
+    rgb.a = known;
+    return { rgb: rgb, alpha: alpha, legacy: slash === -1 };
+  }
+
+  /**
+   * The plain number a `var()` falls back to, or null when there is not one.
+   * `var(--o, 0.1)` is 0.1; `var(--o)` and `var(--o, var(--p))` are unknowable.
+   */
+  function fallbackAlpha(text) {
+    var comma = -1, depth = 0;
+    for (var i = 4; i < text.length - 1; i++) {   // inside `var(` … `)`
+      var ch = text.charAt(i);
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if (depth === 0 && ch === ',') { comma = i; break; }
+    }
+    if (comma === -1) return null;
+    var raw = text.slice(comma + 1, text.length - 1).trim();
+    var pct = raw.charAt(raw.length - 1) === '%';
+    if (pct) raw = raw.slice(0, -1);
+    if (!/^[0-9]*\.?[0-9]+$/.test(raw)) return null;
+    var n = parseFloat(raw);
+    if (isNaN(n)) return null;
+    return C.clamp(pct ? n / 100 : n, 0, 1);
+  }
+
+  /**
    * Rewrite every color in `value` for the given role. Returns null when nothing
    * changed, so callers can skip emitting a redundant declaration.
    */
@@ -170,7 +252,22 @@ Lumen.css = (function () {
     var edits = null;
     eachToken(value, function (start, end, token) {
       var rgb = C.parse(token);
-      if (!rgb) return;
+      if (!rgb) {
+        var split = varAlpha(token);
+        if (!split) return;
+        var shade = C.modify(split.rgb, role, cfg);
+        if (!shade) return;
+        if (Math.round(shade.r) === Math.round(split.rgb.r) &&
+            Math.round(shade.g) === Math.round(split.rgb.g) &&
+            Math.round(shade.b) === Math.round(split.rgb.b)) return;
+        var r = Math.round(shade.r), g = Math.round(shade.g), b = Math.round(shade.b);
+        // Emitted in whichever syntax the page used, so the declaration still
+        // reads like the sheet around it -- and the var is handed back untouched.
+        (edits || (edits = [])).push([start, end, split.legacy
+          ? 'rgba(' + r + ', ' + g + ', ' + b + ', ' + split.alpha + ')'
+          : 'rgb(' + r + ' ' + g + ' ' + b + ' / ' + split.alpha + ')']);
+        return;
+      }
       var out = C.modify(rgb, role, cfg);
       if (!out) return;
       // Compare the colour, not its spelling: `rgb(40, 44, 52)` and `#282c34`
@@ -205,19 +302,52 @@ Lumen.css = (function () {
    * against the document's base URL, so any relative `url()` in them is already
    * wrong and re-emitting it would break the asset.
    */
+  /**
+   * Shorthands that carry a colour, with the longhand that proves whether they
+   * expanded. A shorthand containing a `var()` does NOT expand: CSSOM still lists
+   * its longhands, but reports every one of them empty, so the loop below reads
+   * nothing at all. The shorthand's own text is readable, and it is the only route
+   * to those colours -- `border-color: rgb(229 231 235 / var(--tw-border-opacity, 1))`
+   * is how Tailwind writes every border on the page.
+   */
+  // The longhand that gives a shorthand away, and the shorthand to read instead.
+  var UNEXPANDED = {
+    'border-top-color': ['border-color', 'border'],
+    'background-color': ['background', 'bg']
+  };
+
   function declarations(style, cfg, skipUrls) {
     var out = '';
+    var unexpanded = null;
+
     for (var i = 0; i < style.length; i++) {
       var prop = style[i];
       var role = roleOf(prop);
       if (!role) continue;
       var value = style.getPropertyValue(prop);
-      if (!value) continue;
+      if (!value) {
+        // Listed but empty is the tell: the shorthand that owns this longhand
+        // carries a var() and so did not expand. Noting it here costs nothing --
+        // a block with no such shorthand never reaches the lookup below.
+        if (UNEXPANDED[prop]) (unexpanded || (unexpanded = [])).push(UNEXPANDED[prop]);
+        continue;
+      }
       if (skipUrls && value.indexOf('url(') !== -1) continue;
       var next = modifyValue(value, role, cfg);
       if (next === null) continue;
       out += prop + ':' + next + ' !important;';
     }
+
+    for (var j = 0; unexpanded && j < unexpanded.length; j++) {
+      var name = unexpanded[j][0];
+      var text = style.getPropertyValue(name);
+      if (!text) continue;
+      if (skipUrls && text.indexOf('url(') !== -1) continue;
+      var shade = modifyValue(text, unexpanded[j][1], cfg);
+      if (shade === null) continue;
+      out += name + ':' + shade + ' !important;';
+    }
+
     return out;
   }
 

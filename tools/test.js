@@ -303,5 +303,100 @@ check('repair is idempotent: a repaired colour needs no second pass', (() => {
 check('the light-background threshold is above what our own curve can emit',
   R.thresholds.LIGHT_BG > cfg.bgMax, `${R.thresholds.LIGHT_BG} vs bgMax ${cfg.bgMax}`);
 
+group('css: a colour whose alpha is a var()');
+// Tailwind emits `rgb(255 255 255 / var(--tw-bg-opacity, 1))` for bg-white, and the
+// same shape for every text-/border-/bg- utility used without an opacity modifier.
+// The alpha is a var we must not resolve, but the channels in front of it are an
+// ordinary colour. Skipping the declaration whole hands the entire palette of a
+// Tailwind site to the repair pass, and that pass is asynchronous -- so the page
+// paints light first and corrects itself a few hundred milliseconds later.
+const varAlpha = (v, role) => CSS.modifyValue(v, role || 'bg', cfg);
+const noAlpha = (v) => String(v).replace(/\s*\/\s*var\([^)]*\)/, '');
+
+check('bg-white converts, and keeps the opacity var', (() => {
+  const out = varAlpha('rgb(255 255 255 / var(--tw-bg-opacity, 1))');
+  return out !== null && /var\(--tw-bg-opacity, 1\)/.test(out) && L(noAlpha(out)) < 0.2;
+})(), String(varAlpha('rgb(255 255 255 / var(--tw-bg-opacity, 1))')));
+
+// A fallback is needed for the alpha to be knowable at all -- see the wash group
+// below -- so the legacy-syntax case carries one, like the modern one above.
+check('the legacy comma form converts too', (() => {
+  const out = varAlpha('rgba(255, 255, 255, var(--tw-bg-opacity, 1))');
+  return out !== null && /^rgba\(/.test(out) && /var\(--tw-bg-opacity, 1\)/.test(out) &&
+         L(out.replace(/,\s*var\([^)]*\)\s*\)$/, ')')) < 0.2;
+})(), String(varAlpha('rgba(255, 255, 255, var(--tw-bg-opacity, 1))')));
+
+check('dark text with a var alpha is lightened, not darkened', (() => {
+  const out = varAlpha('rgb(26 26 26 / var(--tw-text-opacity, 1))', 'fg');
+  return out !== null && L(noAlpha(out)) > 0.5;
+})(), String(varAlpha('rgb(26 26 26 / var(--tw-text-opacity, 1))', 'fg')));
+
+check('an already-dark surface with a var alpha is left alone',
+  varAlpha('rgb(20 20 20 / var(--tw-bg-opacity, 1))') === null,
+  String(varAlpha('rgb(20 20 20 / var(--tw-bg-opacity, 1))')));
+
+// The channels themselves being a var is a different thing entirely: there is no
+// colour to read, so there is nothing we can honestly convert.
+check('a var in the CHANNELS is still untouchable',
+  varAlpha('rgb(var(--brand-rgb) / 0.5)') === null,
+  String(varAlpha('rgb(var(--brand-rgb) / 0.5)')));
+
+// The plain #ffffff in this gradient converts on its own, so the assertion has to
+// name the var-alpha stop specifically: no white may survive anywhere in the value.
+// Both stops are checked by lightness rather than by an exact hex, so tuning the
+// curve cannot break this test for a reason that has nothing to do with it.
+check('a var-alpha colour nested in a gradient converts as well', (() => {
+  const out = varAlpha('linear-gradient(rgb(255 255 255 / var(--tw-bg-opacity, 1)), #ffffff)');
+  if (out === null || !/var\(--tw-bg-opacity, 1\)/.test(out)) return false;
+  // The var-alpha stop: no white may survive it. The plain stop: dark by lightness,
+  // not by an exact hex, so tuning the curve cannot break this for an unrelated reason.
+  const hex = (out.match(/#[0-9a-f]{6}/i) || [])[0];
+  return !/255\s+255\s+255/.test(out) && hex !== undefined && L(hex) < 0.2;
+})(), String(varAlpha('linear-gradient(rgb(255 255 255 / var(--tw-bg-opacity, 1)), #ffffff)')));
+
+check('hsl with a var alpha converts, emitted as rgb', (() => {
+  const out = varAlpha('hsl(0 0% 100% / var(--o, 1))');
+  return out !== null && /^rgb\(/.test(out) && /var\(--o, 1\)/.test(out) && L(noAlpha(out)) < 0.2;
+})(), String(varAlpha('hsl(0 0% 100% / var(--o, 1))')));
+
+check('hsla with a var alpha converts, emitted as rgba', (() => {
+  const out = varAlpha('hsla(210, 40%, 98%, var(--o))');
+  return out === null || /^rgba\(/.test(out);
+})(), String(varAlpha('hsla(210, 40%, 98%, var(--o))')));
+
+group('css: a var alpha must not destroy a translucent wash');
+// `C.modify` keeps a translucent white wash light enough to still read as a
+// separator over the new dark base -- but it can only do that when it knows the
+// alpha. Reading the channels on their own hands it a=1, so a 10% white divider
+// came out near-black and vanished. Two honest answers: use the var's own
+// fallback when it is a plain number, and refuse outright when it is not, which
+// leaves the declaration to the repair pass exactly as before.
+check('a numeric var fallback is read as the real alpha', (() => {
+  const out = varAlpha('rgb(255 255 255 / var(--o, 0.1))');
+  return out !== null && L(noAlpha(out)) >= cfg.bgMax;
+})(), String(varAlpha('rgb(255 255 255 / var(--o, 0.1))')));
+
+check('the same wash in the legacy syntax keeps its lightness', (() => {
+  const out = varAlpha('rgba(255, 255, 255, var(--o, 0.1))');
+  return out !== null && L(out.replace(/,\s*var\([^)]*\)\s*\)$/, ')')) >= cfg.bgMax;
+})(), String(varAlpha('rgba(255, 255, 255, var(--o, 0.1))')));
+
+check('an opaque fallback still converts all the way down',
+  (() => {
+    const out = varAlpha('rgb(255 255 255 / var(--tw-bg-opacity, 1))');
+    return out !== null && L(noAlpha(out)) < 0.2;
+  })(), String(varAlpha('rgb(255 255 255 / var(--tw-bg-opacity, 1))')));
+
+// No fallback at all: the alpha is genuinely unknowable, and guessing either way
+// is wrong for half the pages. Refusing leaves it to the repair pass, which reads
+// the colour the browser actually resolved.
+check('an unreadable alpha is refused, not guessed',
+  varAlpha('rgba(255, 255, 255, var(--o))') === null,
+  String(varAlpha('rgba(255, 255, 255, var(--o))')));
+
+check('a non-numeric fallback is refused too',
+  varAlpha('rgb(255 255 255 / var(--o, var(--p)))') === null,
+  String(varAlpha('rgb(255 255 255 / var(--o, var(--p)))')));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

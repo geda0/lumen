@@ -9,7 +9,7 @@
  *   node tools/states-spec.js            (needs tools/fixture/serve.py running)
  */
 'use strict';
-const { chromium } = require(process.env.PW || '/opt/node22/lib/node_modules/playwright');
+const { chromium } = require('./pw');
 
 const URL = 'http://localhost:8123/tools/fixture/states.html?lumen=1';
 
