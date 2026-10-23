@@ -89,8 +89,10 @@ const IDS = ['card', 'title', 'muted', 'legacy', 'wash', 'unknown', 'brand'];
 
     // --- a translucent wash is a separator, not a surface --------------------
     // Converting a 10% white divider as though it were opaque makes it vanish.
+    // Bounded on BOTH sides: a one-sided `l > DARK` would also be satisfied by the
+    // wash never being converted at all and simply staying white.
     await check('a 10% white wash keeps enough lightness to still read',
-      settled.wash.bg, (l) => l > DARK);
+      settled.wash.bg, (l) => l > DARK && l < LIGHT);
 
     // --- an unknowable alpha is still handled, just later --------------------
     // The walker declines it, so this one is the repair pass's job; what matters

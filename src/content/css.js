@@ -310,10 +310,19 @@ Lumen.css = (function () {
    * to those colours -- `border-color: rgb(229 231 235 / var(--tw-border-opacity, 1))`
    * is how Tailwind writes every border on the page.
    */
-  // The longhand that gives a shorthand away, and the shorthand to read instead.
+  /**
+   * The longhand that gives a shorthand away, and the shorthand to read instead.
+   *
+   * `border-color` only, deliberately. The `background` shorthand would be the
+   * obvious companion, but re-emitting it resets background-clip, -size,
+   * -position and the rest to their initial values -- at `!important`, over a
+   * declaration we never read, since none of those properties carries a colour.
+   * That turns `background-clip: text` gradient text solid. `border-color` sets
+   * four colour longhands and nothing else, so it carries no such freight; a
+   * background the walker cannot read is left to the repair pass, as before.
+   */
   var UNEXPANDED = {
-    'border-top-color': ['border-color', 'border'],
-    'background-color': ['background', 'bg']
+    'border-top-color': ['border-color', 'border']
   };
 
   function declarations(style, cfg, skipUrls) {

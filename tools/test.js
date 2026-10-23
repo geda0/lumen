@@ -359,10 +359,13 @@ check('hsl with a var alpha converts, emitted as rgb', (() => {
   return out !== null && /^rgb\(/.test(out) && /var\(--o, 1\)/.test(out) && L(noAlpha(out)) < 0.2;
 })(), String(varAlpha('hsl(0 0% 100% / var(--o, 1))')));
 
+// A fallback, so this actually exercises the legacy hsla path instead of being
+// satisfied by the refusal: `out === null ||` would have made it unfailable.
 check('hsla with a var alpha converts, emitted as rgba', (() => {
-  const out = varAlpha('hsla(210, 40%, 98%, var(--o))');
-  return out === null || /^rgba\(/.test(out);
-})(), String(varAlpha('hsla(210, 40%, 98%, var(--o))')));
+  const out = varAlpha('hsla(210, 40%, 98%, var(--o, 1))');
+  return out !== null && /^rgba\(/.test(out) && /var\(--o, 1\)/.test(out) &&
+         L(out.replace(/,\s*var\([^)]*\)\s*\)$/, ')')) < 0.2;
+})(), String(varAlpha('hsla(210, 40%, 98%, var(--o, 1))')));
 
 group('css: a var alpha must not destroy a translucent wash');
 // `C.modify` keeps a translucent white wash light enough to still read as a
@@ -397,6 +400,76 @@ check('an unreadable alpha is refused, not guessed',
 check('a non-numeric fallback is refused too',
   varAlpha('rgb(255 255 255 / var(--o, var(--p)))') === null,
   String(varAlpha('rgb(255 255 255 / var(--o, var(--p)))')));
+
+check('a percentage fallback is read as a fraction', (() => {
+  const out = varAlpha('rgb(255 255 255 / var(--o, 10%))');
+  return out !== null && L(noAlpha(out)) >= cfg.bgMax;
+})(), String(varAlpha('rgb(255 255 255 / var(--o, 10%))')));
+
+check('an out-of-range fallback is clamped, not trusted', (() => {
+  const out = varAlpha('rgb(255 255 255 / var(--o, 5))');
+  return out !== null && L(noAlpha(out)) < 0.2;   // clamped to 1 = opaque
+})(), String(varAlpha('rgb(255 255 255 / var(--o, 5))')));
+
+group('css: a shorthand CSSOM did not expand');
+// A shorthand carrying a var() does not expand: CSSOM still lists its longhands
+// but reports every one of them empty, so the ordinary loop reads nothing. This
+// is the only route to those colours. `declarations()` takes a plain
+// CSSStyleDeclaration and touches no DOM, so a stand-in object tests it here
+// rather than only through a browser.
+// `listed` is what CSSOM enumerates (longhands only — it never indexes the
+// shorthand name); `readable` is what getPropertyValue will additionally answer,
+// which is where the unexpanded shorthand lives.
+function fakeStyle(listed, readable) {
+  const map = Object.assign({}, listed, readable || {});
+  const names = Object.keys(listed);
+  const style = { length: names.length, getPropertyValue: (p) => map[p] || '' };
+  names.forEach((n, i) => { style[i] = n; });
+  return style;
+}
+
+const borderStyle = () => fakeStyle({
+  // listed, but empty: the tell that `border-color` carries a var()
+  'border-top-color': '', 'border-right-color': '', 'border-bottom-color': '',
+  'border-left-color': '',
+}, { 'border-color': 'rgb(229 231 235 / var(--tw-border-opacity, 1))' });
+
+check('an unexpanded border-color is read by name and emitted once', (() => {
+  const out = CSS.declarations(borderStyle(), cfg, false);
+  return (out.match(/border-color:/g) || []).length === 1 &&
+         !/border-top-color:/.test(out) && /!important/.test(out);
+})(), CSS.declarations(borderStyle(), cfg, false));
+
+check('the shorthand is converted for the BORDER role, not a surface', (() => {
+  const out = CSS.declarations(borderStyle(), cfg, false);
+  const colour = (out.match(/border-color:\s*([^!]+)\s*!/) || [])[1];
+  return colour !== undefined && L(noAlpha(colour.trim())) >= cfg.borderMin - 0.02;
+})(), CSS.declarations(borderStyle(), cfg, false));
+
+check('a cross-origin sheet still skips a shorthand carrying url()', (() => {
+  const s = fakeStyle({ 'background-color': '' },
+    { background: 'url(x.png) rgb(255 255 255 / var(--o, 1))' });
+  return CSS.declarations(s, cfg, true) === '';
+})(), CSS.declarations(fakeStyle({ 'background-color': '' },
+  { background: 'url(x.png) rgb(255 255 255 / var(--o, 1))' }), cfg, true));
+
+// The `background` shorthand resets background-clip, -size, -position and the
+// rest to their initial values. Re-emitting it at `!important` would therefore
+// undo a `background-clip: text` the page set in a declaration we never read,
+// turning gradient text solid. A background is reachable by the repair pass;
+// this is not worth breaking it for.
+check('an unexpanded background shorthand is NOT re-emitted', (() => {
+  const s = fakeStyle({ 'background-color': '' },
+    { background: 'linear-gradient(rgb(255 255 255 / var(--o, 1)), #fff)' });
+  return !/(^|;)\s*background:/.test(CSS.declarations(s, cfg, false));
+})(), CSS.declarations(fakeStyle({ 'background-color': '' },
+  { background: 'linear-gradient(rgb(255 255 255 / var(--o, 1)), #fff)' }), cfg, false));
+
+check('a block with no unexpanded shorthand emits only its longhands', (() => {
+  const s = fakeStyle({ 'background-color': 'rgb(255 255 255 / var(--o, 1))' });
+  const out = CSS.declarations(s, cfg, false);
+  return /background-color:/.test(out) && !/(^|;)\s*background:/.test(out);
+})(), CSS.declarations(fakeStyle({ 'background-color': 'rgb(255 255 255 / var(--o, 1))' }), cfg, false));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
